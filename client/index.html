@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>StreamCinema</title></head>
+<body class="central-body">
+  <div id="central-setup" class="central-setup hidden">
+    <h1>StreamCinema</h1><p>Connect this TV to your local catalog server.</p>
+    <form id="central-form"><label>Server URL<input id="central-url" type="url" placeholder="http://10.42.0.86:8080" required></label>
+      <label>TV access token<input id="central-token" type="password" autocomplete="off" required></label>
+      <button class="primary">Connect</button><p id="central-setup-error" role="status"></p></form>
+  </div>
+  <div id="central-app" class="central-app hidden">
+    <aside id="central-sidebar"><div class="central-brand">Stream<span>Cinema</span></div><nav>
+      <button data-view="home">Home</button><button data-view="movies">Movies</button><button data-view="series">Series</button>
+      <button data-view="live">Live TV</button><button data-view="my-list">My List</button><button data-view="search">Search</button><button data-view="settings">Settings</button>
+    </nav><button id="central-profile">Profile</button></aside>
+    <main id="central-main" tabindex="-1"><div id="central-status" class="central-status" role="status"></div><div id="central-content"></div></main>
+  </div>
+  <div id="central-player" class="central-player hidden"><video id="central-video" playsinline></video>
+    <div class="central-player-ui"><button id="central-player-back">← Back</button><strong id="central-playing-title"></strong>
+      <button id="central-play-pause">Pause</button><button id="central-rewind">−10s</button><button id="central-forward">+10s</button>
+      <button id="central-audio">Audio</button><button id="central-subtitle">Subtitles</button><span id="central-player-status" role="status"></span></div></div>
+  <script type="module" src="/src/main.ts"></script>
+</body></html>

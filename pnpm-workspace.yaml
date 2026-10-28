@@ -1,0 +1,9 @@
+packages:
+  - .
+  - client
+  - server
+allowBuilds:
+  '@webos-tools/cli': true
+  cpu-features: false
+  esbuild: true
+  ssh2: false

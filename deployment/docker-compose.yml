@@ -1,0 +1,38 @@
+services:
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: streamcinema
+      POSTGRES_USER: streamcinema
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - catalog_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamcinema -d streamcinema"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://streamcinema:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/streamcinema
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN}
+      CREDENTIAL_KEY: ${CREDENTIAL_KEY:?Set CREDENTIAL_KEY}
+      XTREAM_BASE_URL: ${XTREAM_BASE_URL:-}
+      XTREAM_USERNAME: ${XTREAM_USERNAME:-}
+      XTREAM_PASSWORD: ${XTREAM_PASSWORD:-}
+      HOST: 0.0.0.0
+      PORT: 8080
+      SYNC_INTERVAL_HOURS: ${SYNC_INTERVAL_HOURS:-12}
+      MOCK_CATALOG: ${MOCK_CATALOG:-0}
+    ports:
+      - "${BIND_IP:-127.0.0.1}:8080:8080"
+volumes:
+  catalog_data:

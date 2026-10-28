@@ -1,0 +1,11 @@
+{
+  "name": "streamcinema",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --dir client dev",
+    "build": "pnpm --dir server build && pnpm --dir client build",
+    "test": "pnpm --dir server test",
+    "package:webos": "pnpm --dir client build && pnpm --dir client exec ares-package dist -o ../packages"
+  }
+}
