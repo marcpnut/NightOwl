@@ -8,15 +8,20 @@
       <button class="primary">Connect</button><p id="central-setup-error" role="status"></p></form>
   </div>
   <div id="central-app" class="central-app hidden">
-    <aside id="central-sidebar"><div class="central-brand">Stream<span>Cinema</span></div><nav>
-      <button data-view="home">Home</button><button data-view="movies">Movies</button><button data-view="series">Series</button>
-      <button data-view="live">Live TV</button><button data-view="my-list">My List</button><button data-view="search">Search</button><button data-view="settings">Settings</button>
-    </nav><button id="central-profile">Profile</button></aside>
+    <header id="central-header" class="central-header"><div class="central-brand" aria-label="StreamCinema">STREAM<span>CINEMA</span></div>
+      <nav id="central-nav" aria-label="Main navigation">
+        <button data-view="search" aria-label="Search" class="nav-search"><span class="search-icon" aria-hidden="true"></span> Search</button>
+        <button data-view="home">Home</button><button data-view="series">Shows</button><button data-view="movies">Movies</button>
+        <button data-view="live">Live TV</button><button data-view="my-list">My Cinema</button>
+      </nav><button id="central-profile" class="central-profile" aria-label="Choose profile">Profile</button>
+    </header>
     <main id="central-main" tabindex="-1"><div id="central-status" class="central-status" role="status"></div><div id="central-content"></div></main>
+    <button id="central-settings-shortcut" class="central-settings-shortcut" data-view="settings" aria-label="Settings" title="Settings">⚙</button>
   </div>
   <div id="central-player" class="central-player hidden"><video id="central-video" playsinline></video>
-    <div class="central-player-ui"><button id="central-player-back">← Back</button><strong id="central-playing-title"></strong>
-      <button id="central-play-pause">Pause</button><button id="central-rewind">−10s</button><button id="central-forward">+10s</button>
-      <button id="central-audio">Audio</button><button id="central-subtitle">Subtitles</button><span id="central-player-status" role="status"></span></div></div>
+    <div class="central-player-ui"><div class="central-player-heading"><button id="central-player-back">← Back</button><strong id="central-playing-title"></strong><span id="central-player-status" role="status"></span></div>
+      <div class="central-player-progress"><span id="central-player-time">0:00</span><div class="central-player-track"><div id="central-player-fill"></div></div><span id="central-player-duration">0:00</span></div>
+      <div class="central-player-actions"><button id="central-rewind">↶ 10</button><button id="central-play-pause">Pause</button><button id="central-forward">10 ↷</button><span class="central-player-spacer"></span>
+        <button id="central-audio">Audio</button><button id="central-subtitle">Subtitles</button></div></div></div>
   <script type="module" src="/src/main.ts"></script>
 </body></html>

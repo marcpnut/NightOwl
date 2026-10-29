@@ -5,3 +5,4 @@ packages/
 .env.*
 !.env.example
 *.log
+demo-assets/flower.mp4

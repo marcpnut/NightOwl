@@ -4,7 +4,7 @@ Date: 29 October 2026. Status labels below distinguish implemented, tested, and 
 
 ## 1. Netflix UI behavior findings
 
-The TV's public Netflix manifest was inspected read-only. It identifies a native, trusted, non-inspectable app, version 1.4.5, with a 1920×1080 declared app resolution and virtual-touch support. No authorized screen observation was available, so specific Netflix home, focus, playback, and transition behavior was **not observed**. The StreamCinema interface is independently designed using common TV patterns. See `research/netflix-webos-findings.md`.
+The TV's public Netflix manifest was inspected read-only. It identifies a native, trusted, non-inspectable app, version 1.4.5, with a 1920×1080 declared app resolution and virtual-touch support. No authorized screen observation was available, so its exact on-device interface and animation performance were **not observed**. Following owner feedback, the draft client was redesigned against Netflix's published 2025 TV screenshots and navigation guide: top menu, prominent featured title, landscape recommendations, and remote Back returning to navigation. The supplied REA repository was assessed; it is a general analysis toolkit and supplied no Netflix UI implementation. See `research/netflix-webos-findings.md`.
 
 ## 2. Firmware and compatibility findings
 
@@ -32,23 +32,23 @@ Implemented: health, home, paged catalog, details, seasons and paged episodes, l
 
 ## 8. TV interface status
 
-Implemented and compiled: original TV layout with hero and horizontal rows, focusable D-pad navigation, sidebar, 20-item pagination, lazy artwork, details, season and episode selector, search, profiles, My List, Continue Watching, player controls, track selection where exposed, and central progress. The final client bundle is 21.32 kB JavaScript. Physical TV rendering and playback are **not tested**. Local browser visual inspection was blocked by Work settings.
+Implemented and compiled: original TV layout with a top navigation menu, cinematic hero, wide horizontal cards, focusable D-pad navigation, 20-item pagination, lazy artwork, full-screen details, season and episode selector, search, profiles, My Cinema hub for My List and Continue Watching, player controls with progress display, track selection where exposed, and central progress. The client bundle is 31.74 kB JavaScript (9.95 kB gzip). A localhost preview was visually inspected at 1280×720 with an original generated hero and three generated title images. Browser keyboard checks verified Down/Right/OK/Back focus flow, including focus restoration to the prior card; the sample MP4 played. Physical TV rendering and playback are **not tested**.
 
 ## 9. Automated tests
 
-Five tests passed: randomized authenticated encryption, bearer validation, Xtream record mapping, playback URL construction, and API auth/input validation. The final TypeScript server/client build passed, and a webOS IPK was created locally. Database-backed behavior was not covered by these tests.
+Five tests passed: randomized authenticated encryption, bearer validation, Xtream record mapping, playback URL construction, and API auth/input validation. The final TypeScript server/client build passed, and the revised webOS IPK was packaged locally. Database-backed behavior was not covered by these tests.
 
 ## 10. Actual performance measurements
 
-Local in-process auth rejection: 3.61 ms; invalid input rejection: 2.88 ms. Final client build: 129 ms; 21.32 kB JavaScript (7.38 kB gzip). These do not measure LAN response, PostgreSQL, TV startup, or playback. None of the TV/LAN latency targets are claimed as met.
+Local in-process auth rejection: 3.37 ms; invalid input rejection: 2.83 ms in the latest test run. Five localhost HTTP measurements after warmup: health 0.81–1.03 ms, demo home 0.83–1.03 ms. Client production build: 134 ms; 31.74 kB JavaScript (9.95 kB gzip). The demo home uses in-memory fictional data, so these do not measure PostgreSQL, LAN response, TV startup, or provider playback. None of the TV/LAN latency targets are claimed as met.
 
 ## 11. Deployment status
 
-No LXC was created. Proxmox key-only SSH failed, and container ID/IP availability could not be inspected. No TV development package was installed. The existing app and Netflix installation remain untouched. Docker Compose, Dockerfile, environment example, and rollout instructions are prepared but untested on Proxmox.
+No LXC was created. Proxmox key-only SSH failed, and container ID/IP availability could not be inspected. No TV development package was installed. The existing app and Netflix installation remain untouched. The local fictional catalog demo is running on `http://127.0.0.1:8080/?demo=1` for owner review; its data resets when stopped. Docker Compose, Dockerfile, environment example, and rollout instructions are prepared but untested on Proxmox.
 
 ## 12. Outstanding issues and next steps
 
-1. Review and test the locally built webOS package on the Nano after approval.
+1. Review the local preview against the LG's actual Netflix screens; online screenshots may depict a different Netflix rollout. Test and package the revised client on the Nano after approval.
 2. Obtain Proxmox access and one owner approval to provision the LXC and install the standalone development app. Verify ID 190 and 10.42.0.86 first.
 3. Run PostgreSQL migration, mock catalog API smoke test, then provider sync with protected credentials.
 4. Measure API and TV startup, exercise real streams on the Nano, confirm codec/HLS and remote behavior, and refine focus/track compatibility.

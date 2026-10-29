@@ -50,6 +50,19 @@ let audioIndex = 0;
 let activeLiveFormat: 'm3u8' | 'ts' = 'm3u8';
 const watched = new Map<string, number>();
 const favorites = new Set<string>();
+function playbackClock(seconds: number): string {
+  if (!Number.isFinite(seconds)) return 'LIVE';
+  const value = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(value / 3600), minutes = Math.floor(value % 3600 / 60), rest = value % 60;
+  const secondText = `0${rest}`.slice(-2);
+  return hours ? `${hours}:${`0${minutes}`.slice(-2)}:${secondText}` : `${minutes}:${secondText}`;
+}
+function updatePlaybackProgress(): void {
+  el('central-player-time').textContent = playbackClock(video.currentTime);
+  el('central-player-duration').textContent = playbackClock(video.duration);
+  el('central-player-fill').style.width = Number.isFinite(video.duration) && video.duration > 0
+    ? `${Math.max(0, Math.min(100, video.currentTime / video.duration * 100))}%` : '0%';
+}
 
 function clear(node: HTMLElement): void { while (node.firstChild) node.removeChild(node.firstChild); }
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -83,10 +96,11 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
 function cancelRequest(): void { activeController?.abort(); requestGeneration += 1; }
 function navigate(next: View): void {
   cancelRequest();
+  app.classList.remove('detail-open');
   if (next !== 'detail' && next !== 'profiles') previousView = next;
   view = next;
   clear(content);
-  document.querySelectorAll<HTMLButtonElement>('#central-sidebar [data-view]').forEach((button) => {
+  document.querySelectorAll<HTMLButtonElement>('#central-app [data-view]').forEach((button) => {
     button.classList.toggle('active', button.dataset.view === next);
   });
   setStatus('');
@@ -102,11 +116,19 @@ function card(item: Item): HTMLButtonElement {
   button.type = 'button';
   button.dataset.cardKey = `${item.kind}:${item.id}`;
   button.setAttribute('aria-label', `Open ${item.title}`);
-  if (item.posterUrl) {
-    const image = node('img'); image.src = item.posterUrl; image.alt = ''; image.loading = 'lazy';
+  if (item.backdropUrl || item.posterUrl) {
+    const image = node('img'); image.src = item.backdropUrl || item.posterUrl || ''; image.alt = ''; image.loading = 'lazy';
     image.onerror = () => image.style.visibility = 'hidden'; button.appendChild(image);
   } else button.appendChild(node('div', 'central-placeholder'));
-  button.appendChild(node('span', undefined, item.title));
+  const label = node('span', 'central-card-title', item.title);
+  button.appendChild(label);
+  const sub = node('small', 'central-card-meta', [item.releaseYear, item.genre].filter(Boolean).join(' · '));
+  button.appendChild(sub);
+  if (item.positionSeconds) {
+    const progress = node('i', 'central-card-progress');
+    progress.style.width = `${Math.max(3, Math.min(96, Math.round(100 * item.positionSeconds / (item.durationSeconds || 3600))))}%`;
+    button.appendChild(progress);
+  }
   button.onclick = () => void openItem(item);
   return button;
 }
@@ -139,14 +161,26 @@ async function showHome(): Promise<void> {
       if (home.featured.backdropUrl || home.featured.posterUrl) {
         const image = node('img'); image.src = home.featured.backdropUrl || home.featured.posterUrl || ''; image.alt = ''; hero.appendChild(image);
       }
-      const copy = node('div', 'central-hero-copy'); copy.appendChild(node('h1', undefined, home.featured.title));
+      const copy = node('div', 'central-hero-copy');
+      copy.appendChild(node('div', 'central-hero-eyebrow', 'STREAMCINEMA  ·  FEATURED'));
+      copy.appendChild(node('h1', undefined, home.featured.title));
+      copy.appendChild(node('div', 'central-hero-meta', [home.featured.releaseYear, home.featured.genre, home.featured.kind === 'series' ? 'Series' : 'Film'].filter(Boolean).join('  ·  ')));
       copy.appendChild(node('p', undefined, home.featured.description || 'Featured from your catalog.'));
-      const play = node('button', 'primary', 'View details') as HTMLButtonElement;
-      play.onclick = () => void openItem(home.featured!); copy.appendChild(play); hero.appendChild(copy); content.appendChild(hero);
+      const actions = node('div', 'central-hero-actions');
+      const playButton = node('button', 'primary', '▶  Play') as HTMLButtonElement;
+      playButton.onclick = () => void play(home.featured!); actions.appendChild(playButton);
+      const info = node('button', 'secondary', 'ⓘ  More Info') as HTMLButtonElement;
+      info.onclick = () => void openItem(home.featured!); actions.appendChild(info);
+      copy.appendChild(actions); hero.appendChild(copy); content.appendChild(hero);
     }
-    for (const group of home.rows) if (group.items.length) content.appendChild(row(group.title, group.items));
+    const ordered = home.rows.filter((group) => group.items.length);
+    const first = (continueRow?.items.length ? continueRow : undefined) || ordered.find((group) => group.id === 'recommended-movies') || ordered[0];
+    if (first) content.appendChild(row(first.id === 'recommended-movies' ? 'Your Next Watch' : first.title, first.items));
+    for (const group of ordered) if (group !== first) content.appendChild(row(group.title, group.items));
     setStatus('');
-    focusReturnedCard(content);
+    const preferred = Array.from(content.querySelectorAll<HTMLButtonElement>('[data-card-key]')).find((button) => button.dataset.cardKey === restoreCardKey);
+    (preferred ?? content.querySelector<HTMLButtonElement>('.central-hero-actions button'))?.focus();
+    restoreCardKey = '';
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
 async function showList(section: 'movies' | 'series' | 'live', append = false): Promise<void> {
@@ -157,7 +191,9 @@ async function showList(section: 'movies' | 'series' | 'live', append = false): 
     if (generation !== requestGeneration) return;
     loadedItems = loadedItems.concat(result.items);
     clear(content);
-    const heading = node('div', 'central-list-header'); heading.appendChild(node('h1', undefined, section === 'live' ? 'Live TV' : section[0].toUpperCase() + section.slice(1)));
+    const heading = node('div', 'central-list-header');
+    heading.appendChild(node('div', 'central-page-kicker', 'EXPLORE'));
+    heading.appendChild(node('h1', 'central-page-title', section === 'live' ? 'Live TV' : section === 'series' ? 'Shows' : 'Movies'));
     content.appendChild(heading);
     const grid = node('div', 'central-grid'); loadedItems.forEach((item) => grid.appendChild(card(item))); content.appendChild(grid);
     if (result.hasMore) {
@@ -172,16 +208,22 @@ async function showList(section: 'movies' | 'series' | 'live', append = false): 
 async function showMyList(): Promise<void> {
   if (!profile) return;
   try {
-    const result = await api<{ items: Item[] }>(`/profiles/${profile.id}/my-list`);
+    const [result, home] = await Promise.all([
+      api<{ items: Item[] }>(`/profiles/${profile!.id}/my-list`),
+      api<Home>(`/home?profileId=${encodeURIComponent(profile.id)}`)
+    ]);
     if (view !== 'my-list') return;
-    clear(content); content.appendChild(node('h1', undefined, 'My List'));
-    const grid = node('div', 'central-grid'); result.items.forEach((item) => grid.appendChild(card(item))); content.appendChild(grid);
-    focusReturnedCard(grid);
-    if (!result.items.length) setStatus('Your list is empty.');
+    clear(content); content.appendChild(node('div', 'central-page-kicker', 'YOUR SPACE'));
+    content.appendChild(node('h1', 'central-page-title', 'My Cinema'));
+    const continueItems = home.rows.find((group) => group.id === 'continue')?.items || [];
+    if (continueItems.length) content.appendChild(row('Continue Watching', continueItems));
+    if (result.items.length) content.appendChild(row('My List', result.items));
+    if (!continueItems.length && !result.items.length) content.appendChild(node('p', 'central-page-description', 'Titles you save or start watching will appear here.'));
+    focusReturnedCard(content);
   } catch (error) { setStatus(errorMessage(error)); }
 }
 function showSearch(): void {
-  const heading = node('h1', undefined, 'Search'); content.appendChild(heading);
+  const heading = node('h1', 'central-page-title', 'Search'); content.appendChild(heading);
   const input = node('input', 'central-search') as HTMLInputElement; input.type = 'search'; input.placeholder = 'Movies and series';
   content.appendChild(input);
   const results = node('div', 'central-grid'); content.appendChild(results);
@@ -204,37 +246,41 @@ async function openItem(item: Item): Promise<void> {
   if (item.kind === 'live' || item.kind === 'episode') { await play(item); return; }
   lastFocus = document.activeElement as HTMLElement;
   restoreCardKey = `${item.kind}:${item.id}`;
-  view = 'detail'; clear(content); setStatus('Loading details…');
+  view = 'detail'; clear(content); app.classList.add('detail-open'); setStatus('Loading details…');
   try {
     const detail = await api<Item>(`/${item.kind === 'movie' ? 'movies' : 'series'}/${item.id}`);
     if (view !== 'detail') return;
     currentItem = detail;
     clear(content); setStatus('');
-    const back = node('button', 'central-more', '← Back') as HTMLButtonElement;
-    back.onclick = () => backFromDetail(); content.appendChild(back);
     const layout = node('section', 'central-detail');
-    if (detail.posterUrl) { const image = node('img'); image.src = detail.posterUrl; image.alt = ''; layout.appendChild(image); }
-    const body = node('div'); body.appendChild(node('h1', undefined, detail.title));
+    if (detail.backdropUrl || detail.posterUrl) { const image = node('img', 'central-detail-backdrop'); image.src = detail.backdropUrl || detail.posterUrl || ''; image.alt = ''; layout.appendChild(image); }
+    const body = node('div', 'central-detail-body');
+    const back = node('button', 'central-detail-back', '←  Back') as HTMLButtonElement;
+    back.onclick = () => backFromDetail(); body.appendChild(back);
+    body.appendChild(node('div', 'central-hero-eyebrow', detail.kind === 'series' ? 'SERIES' : 'FILM'));
+    body.appendChild(node('h1', undefined, detail.title));
     const meta = [detail.releaseYear, detail.genre, detail.durationSeconds ? `${Math.round(detail.durationSeconds / 60)} min` : ''].filter(Boolean).join(' · ');
-    body.appendChild(node('p', undefined, meta)); body.appendChild(node('p', undefined, detail.description || ''));
-    body.appendChild(node('p', undefined, detail.metadata?.language ? `Listed language: ${detail.metadata.language}` : 'Audio and subtitle availability is detected when playback starts.'));
+    body.appendChild(node('div', 'central-detail-meta', meta)); body.appendChild(node('p', undefined, detail.description || ''));
+    const actions = node('div', 'central-detail-actions');
     if (detail.kind === 'movie') {
-      const playButton = node('button', 'primary', watched.has(`movie:${detail.id}`) ? 'Resume' : 'Play') as HTMLButtonElement;
-      playButton.onclick = () => void play(detail); body.appendChild(playButton);
+      const playButton = node('button', 'primary', watched.has(`movie:${detail.id}`) ? '▶  Resume' : '▶  Play') as HTMLButtonElement;
+      playButton.onclick = () => void play(detail); actions.appendChild(playButton);
     }
     let saved = favorites.has(`${detail.kind}:${detail.id}`);
-    const favorite = node('button', undefined, saved ? 'Remove from My List' : 'Add to My List') as HTMLButtonElement;
+    const favorite = node('button', 'secondary', saved ? '✓  In My List' : '＋  My List') as HTMLButtonElement;
     favorite.onclick = () => void (async () => {
       if (!profile) return;
       saved = !saved;
       try { await api(`/profiles/${profile.id}/my-list`, { kind: detail.kind, id: detail.id, saved });
         if (saved) favorites.add(`${detail.kind}:${detail.id}`); else favorites.delete(`${detail.kind}:${detail.id}`);
-        favorite.textContent = saved ? 'Remove from My List' : 'Add to My List'; }
+        favorite.textContent = saved ? '✓  In My List' : '＋  My List'; }
       catch (error) { saved = !saved; setStatus(errorMessage(error)); }
     })();
-    body.appendChild(favorite); layout.appendChild(body); content.appendChild(layout);
+    actions.appendChild(favorite); body.appendChild(actions);
+    body.appendChild(node('div', 'central-detail-audio', detail.metadata?.language ? `Language: ${detail.metadata.language}` : 'Audio and subtitle options appear during playback.'));
+    layout.appendChild(body); content.appendChild(layout);
     if (detail.kind === 'series') await showEpisodes(detail.id);
-    back.focus();
+    (body.querySelector<HTMLButtonElement>('.primary') ?? back).focus();
   } catch (error) { setStatus(errorMessage(error)); }
 }
 async function showEpisodes(seriesId: string): Promise<void> {
@@ -282,9 +328,12 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8'): Promise<voi
     player.classList.remove('hidden');
     video.src = resolved.url;
     video.load();
-    video.onloadedmetadata = null;
+    updatePlaybackProgress();
     const position = watched.get(`${item.kind}:${item.id}`) ?? item.positionSeconds ?? 0;
-    if (position > 0) video.onloadedmetadata = () => { try { video.currentTime = position; } catch { /* Live streams may not seek. */ } };
+    video.onloadedmetadata = () => {
+      if (position > 0) { try { video.currentTime = position; } catch { /* Live streams may not seek. */ } }
+      updatePlaybackProgress();
+    };
     await video.play();
     playerStatus.textContent = '';
     el<HTMLButtonElement>('central-play-pause').focus();
@@ -326,7 +375,7 @@ async function showSettings(): Promise<void> {
   panel.appendChild(node('p', undefined, `Server: ${config?.url ?? ''}`));
   const sync = node('p', undefined, 'Loading sync status…'); panel.appendChild(sync);
   const reconnect = node('button', undefined, 'Change server') as HTMLButtonElement;
-  reconnect.onclick = () => { localStorage.removeItem('streamcinema.config'); location.reload(); };
+  reconnect.onclick = () => { localStorage.removeItem('streamcinema.config'); location.href = location.pathname; };
   panel.appendChild(reconnect); content.appendChild(panel);
   try {
     const data = await api<{ datasets: Array<{ dataset: string; status: string; lastSuccessAt?: string }> }>('/sync/status');
@@ -354,7 +403,7 @@ el<HTMLFormElement>('central-form').onsubmit = (event) => {
     catch (error) { el('central-setup-error').textContent = errorMessage(error); }
   })();
 };
-document.querySelectorAll<HTMLButtonElement>('#central-sidebar [data-view]').forEach((button) => {
+document.querySelectorAll<HTMLButtonElement>('#central-app [data-view]').forEach((button) => {
   button.onclick = () => navigate(button.dataset.view as View);
 });
 profileButton.onclick = () => navigate('profiles');
@@ -377,6 +426,7 @@ el<HTMLButtonElement>('central-audio').onclick = () => {
   playerStatus.textContent = `Audio: ${tracks[audioIndex].label || tracks[audioIndex].language || audioIndex + 1}`;
 };
 video.ontimeupdate = () => {
+  updatePlaybackProgress();
   if (Date.now() - lastProgressSave >= 15_000 && playingItem) { lastProgressSave = Date.now(); void saveProgress(); }
 };
 video.onended = () => { void saveProgress(true); closePlayer(false); };
@@ -398,6 +448,7 @@ document.addEventListener('keydown', (event) => {
     if (!player.classList.contains('hidden')) closePlayer();
     else if (view === 'detail') backFromDetail();
     else if (view !== 'home') navigate('home');
+    else document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
     return;
   }
   if (key === 23 && active?.tagName === 'BUTTON') { event.preventDefault(); active.click(); return; }
@@ -426,10 +477,17 @@ document.addEventListener('keydown', (event) => {
 });
 
 try {
+  const localDemo = (location.hostname === '127.0.0.1' || location.hostname === 'localhost') && /(?:^|[?&])demo=1(?:&|$)/.test(location.search);
+  if (localDemo) {
+    void connect({ url: location.origin, token: 'local-demo-only' }).catch((error) => {
+      setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
+    });
+  } else {
   const saved = JSON.parse(localStorage.getItem('streamcinema.config') || 'null') as Config | null;
   if (saved?.url && saved.token) void connect(saved).catch((error) => {
     setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
     el<HTMLInputElement>('central-url').value = saved.url;
   });
   else setup.classList.remove('hidden');
+  }
 } catch { setup.classList.remove('hidden'); }
