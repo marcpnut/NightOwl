@@ -202,9 +202,13 @@ export function createDemoServer() {
       { id: 'adventure', title: 'Adventure', items: movies.filter((item) => item.genre === 'Adventure') }
     ] };
   });
-  app.get('/api/v1/movies', async (request) => page(movieCatalog, request.query as Record<string, unknown>));
-  app.get('/api/v1/series', async (request) => page(seriesCatalog, request.query as Record<string, unknown>));
-  app.get('/api/v1/live', async (request) => page(liveCatalog, request.query as Record<string, unknown>));
+  const selected = (items: Item[], query: Record<string, unknown>) => {
+    const category = typeof query.category === 'string' ? query.category : '';
+    return category ? items.filter((item) => item.categoryId === category) : items;
+  };
+  app.get('/api/v1/movies', async (request) => page(selected(movieCatalog, request.query as Record<string, unknown>), request.query as Record<string, unknown>));
+  app.get('/api/v1/series', async (request) => page(selected(seriesCatalog, request.query as Record<string, unknown>), request.query as Record<string, unknown>));
+  app.get('/api/v1/live', async (request) => page(selected(liveCatalog, request.query as Record<string, unknown>), request.query as Record<string, unknown>));
   app.get('/api/v1/movies/:id', async (request, reply) => movieCatalog.find((item) => item.id === (request.params as { id: string }).id) ?? reply.code(404).send({ error: { message: 'Title not found.' } }));
   app.get('/api/v1/series/:id', async (request, reply) => seriesCatalog.find((item) => item.id === (request.params as { id: string }).id) ?? reply.code(404).send({ error: { message: 'Title not found.' } }));
   app.get('/api/v1/series/:id/seasons', async (request) => {
@@ -220,6 +224,8 @@ export function createDemoServer() {
     return { seasons: Array.from(seasons.entries()).map(([number, count]) => ({ number, count })) };
   });
   app.get('/api/v1/series/:id/seasons/:season/episodes', async (request) => page(episodeCatalog.filter((item) => item.parentId === (request.params as { id: string }).id && String(item.seasonNumber) === String((request.params as { season: string }).season)), request.query as Record<string, unknown>));
+  app.get('/api/v1/movies/categories', async () => ({ items: categories.filter((item) => item.kind === 'movie') }));
+  app.get('/api/v1/series/categories', async () => ({ items: categories.filter((item) => item.kind === 'series') }));
   app.get('/api/v1/live/categories', async () => ({ items: categories.filter((item) => item.kind === 'live') }));
   app.get('/api/v1/search', async (request) => {
     const q = String((request.query as { q?: string }).q || '').toLowerCase();

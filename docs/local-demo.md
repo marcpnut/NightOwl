@@ -10,4 +10,6 @@ Open Settings → Xtream provider in the local app. The current provider URL and
 
 The first sync can take time for a large account. The page reports its status and item count. The provider login request uses Xtream's `player_api.php`; the returned credentials never go to the app client except the username used for status display.
 
+Movies, Shows, and Live TV pages expose their Xtream categories as horizontal remote-friendly filters. Selecting a category filters and paginates the server-side catalog; the TV does not load the full catalog to filter it.
+
 To stop the demo, terminate the `pnpm demo` process. The production server remains `pnpm --dir server start` with PostgreSQL and protected environment configuration.

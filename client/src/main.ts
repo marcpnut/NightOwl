@@ -42,6 +42,7 @@ let currentItem: Item | null = null;
 let playingItem: Item | null = null;
 let page = 1;
 let loadedItems: Item[] = [];
+const selectedCategoryBySection: Record<'movies' | 'series' | 'live', string> = { movies: '', series: '', live: '' };
 let requestGeneration = 0;
 let activeController: AbortController | null = null;
 let lastProgressSave = 0;
@@ -183,25 +184,38 @@ async function showHome(): Promise<void> {
     restoreCardKey = '';
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
-async function showList(section: 'movies' | 'series' | 'live', append = false): Promise<void> {
+async function showList(section: 'movies' | 'series' | 'live', append = false, category = selectedCategoryBySection[section]): Promise<void> {
   const generation = requestGeneration;
   if (!append) { page = 1; loadedItems = []; setStatus(`Loading ${section}…`); }
   try {
-    const result = await api<{ items: Item[]; hasMore: boolean }>(`/${section}?page=${page}&limit=20`);
+    const [result, categoryResult] = await Promise.all([
+      api<{ items: Item[]; hasMore: boolean }>(`/${section}?page=${page}&limit=20${category ? `&category=${encodeURIComponent(category)}` : ''}`),
+      api<{ items: Array<{ id: string; name: string }> }>(`/${section}/categories`)
+    ]);
     if (generation !== requestGeneration) return;
+    selectedCategoryBySection[section] = category;
     loadedItems = loadedItems.concat(result.items);
     clear(content);
     const heading = node('div', 'central-list-header');
     heading.appendChild(node('div', 'central-page-kicker', 'EXPLORE'));
     heading.appendChild(node('h1', 'central-page-title', section === 'live' ? 'Live TV' : section === 'series' ? 'Shows' : 'Movies'));
     content.appendChild(heading);
+    const categoryBar = node('div', 'central-category-bar');
+    const addCategory = (id: string, label: string) => {
+      const button = node('button', `central-category${category === id ? ' active' : ''}`, label) as HTMLButtonElement;
+      button.onclick = () => { page = 1; loadedItems = []; void showList(section, false, id); };
+      categoryBar.appendChild(button);
+    };
+    addCategory('', 'All');
+    for (const group of categoryResult.items) addCategory(group.id, group.name);
+    content.appendChild(categoryBar);
     const grid = node('div', 'central-grid'); loadedItems.forEach((item) => grid.appendChild(card(item))); content.appendChild(grid);
     if (result.hasMore) {
       const more = node('button', 'central-more', 'Load more') as HTMLButtonElement;
-      more.onclick = () => { page += 1; void showList(section, true); };
+      more.onclick = () => { page += 1; void showList(section, true, category); };
       content.appendChild(more);
     }
-    setStatus(result.items.length ? '' : 'No items are available yet.');
+    setStatus(result.items.length ? '' : category ? 'No items in this category.' : 'No items are available yet.');
     if (!append) focusReturnedCard(grid);
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
