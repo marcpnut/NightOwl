@@ -373,6 +373,39 @@ function showProfiles(): void {
 async function showSettings(): Promise<void> {
   const panel = node('section', 'central-settings'); panel.appendChild(node('h1', undefined, 'Settings'));
   panel.appendChild(node('p', undefined, `Server: ${config?.url ?? ''}`));
+  panel.appendChild(node('h2', undefined, 'Xtream provider'));
+  panel.appendChild(node('p', undefined, 'Credentials stay in this local server process and are not saved to the browser or source files. The provider URL is HTTP; use its HTTPS address if available to encrypt login and stream traffic.'));
+  const form = node('form', 'provider-form') as HTMLFormElement;
+  const providerUrl = node('input', 'central-search') as HTMLInputElement; providerUrl.type = 'url'; providerUrl.value = 'http://line.darktv-pro.cc'; providerUrl.required = true; providerUrl.setAttribute('aria-label', 'Xtream server URL');
+  const providerUser = node('input', 'central-search') as HTMLInputElement; providerUser.type = 'text'; providerUser.value = 'e05320739c'; providerUser.autocomplete = 'off'; providerUser.required = true; providerUser.setAttribute('aria-label', 'Xtream username');
+  const providerPass = node('input', 'central-search') as HTMLInputElement; providerPass.type = 'password'; providerPass.autocomplete = 'new-password'; providerPass.required = true; providerPass.setAttribute('aria-label', 'Xtream password');
+  const connectProvider = node('button', 'central-more', 'Connect and sync') as HTMLButtonElement; connectProvider.type = 'submit';
+  const providerMessage = node('p', 'provider-message', 'Enter your provider password to connect.');
+  form.append(node('label', undefined, 'Server URL'), providerUrl, node('label', undefined, 'Username'), providerUser,
+    node('label', undefined, 'Password'), providerPass, connectProvider, providerMessage);
+  form.onsubmit = (event) => {
+    event.preventDefault(); connectProvider.disabled = true; providerMessage.textContent = 'Checking login…';
+    void (async () => {
+      try {
+        const result = await api<{ connected: boolean }>(`/provider/connect`, { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value });
+        providerPass.value = ''; providerMessage.textContent = 'Connected. Catalog sync is running…';
+        const deadline = Date.now() + 180_000;
+        while (Date.now() < deadline && view === 'settings') {
+          await new Promise((resolve) => window.setTimeout(resolve, 2000));
+          const status = await api<{ status: string; lastError?: string; rowCount?: number }>('/provider/status');
+          if (status.status === 'success') { providerMessage.textContent = `Catalog ready: ${status.rowCount || 0} items.`; connectProvider.disabled = false; return; }
+          if (status.status === 'error') throw new Error(status.lastError || 'Catalog sync failed.');
+        }
+        if (view === 'settings') providerMessage.textContent = 'Still syncing. Check Sync status below in a moment.';
+        void result;
+      } catch (error) { providerMessage.textContent = errorMessage(error); }
+      finally { connectProvider.disabled = false; }
+    })();
+  };
+  panel.appendChild(form);
+  const syncNow = node('button', 'central-more', 'Sync now') as HTMLButtonElement;
+  syncNow.onclick = () => void api('/provider/sync', {}).then(() => { sync.textContent = 'Catalog synchronization started.'; }).catch((error) => { sync.textContent = errorMessage(error); });
+  panel.appendChild(syncNow);
   const sync = node('p', undefined, 'Loading sync status…'); panel.appendChild(sync);
   const reconnect = node('button', undefined, 'Change server') as HTMLButtonElement;
   reconnect.onclick = () => { localStorage.removeItem('streamcinema.config'); location.href = location.pathname; };

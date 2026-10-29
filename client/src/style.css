@@ -13,3 +13,4 @@
 @supports not (display: grid){.central-grid{display:flex;flex-wrap:wrap}.central-grid .central-card{width:23%;height:180px;margin:0 1% 16px 0}}
 @supports not (aspect-ratio: 16 / 9){.central-grid .central-card{height:180px}}
 @supports not (gap: 1px){.central-cards>.central-card,.central-header nav>button,.central-player-actions>button{margin-right:12px}.central-hero-actions>button,.central-detail-actions>button{margin-right:12px}}
+.provider-form{margin:20px 4.2%;max-width:680px}.provider-form label{display:block;font-size:16px;font-weight:700;margin:18px 0 7px}.central-settings .provider-form .central-search{margin:0;width:100%;font-size:18px;padding:13px}.provider-form .central-more{margin:18px 0 8px}.provider-form .central-more:disabled{opacity:.6;cursor:wait}.provider-message{min-height:26px;color:#ddd;font-size:16px}

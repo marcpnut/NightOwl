@@ -2,10 +2,12 @@ import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { mapCatalogItem, mapEpisodes, playbackUrl, providerPlaybackInfo, requestProvider, type CatalogRecord, type ProviderCredentials } from './provider.js';
 
 type Item = { kind: 'movie' | 'series' | 'live' | 'episode'; id: string; title: string; description: string;
   genre?: string; releaseYear?: number; rating?: number; seasonNumber?: number; episodeNumber?: number;
-  posterUrl?: string; backdropUrl?: string; positionSeconds?: number };
+  posterUrl?: string; backdropUrl?: string; positionSeconds?: number; durationSeconds?: number; categoryId?: string;
+  streamExtension?: string; parentId?: string; metadata?: Record<string, unknown> };
 type Profile = { id: string; name: string; deviceId: string };
 const movieTitles = ['The Quiet Signal', 'Northern Light', 'The Last Station', 'Deep Blue Hour', 'A City at Dawn',
   'Across the Valley', 'Before Tomorrow', 'Paper Skies', 'The Hidden Road', 'Winter Current', 'Parallel Days', 'Open Water',
@@ -38,6 +40,48 @@ const episodes: Item[] = series.flatMap((show) => Array.from({ length: 7 }, (_, 
   description: `Season 1 of ${show.title}. Fictional episode for local testing.`, seasonNumber: 1, episodeNumber: index + 1,
   posterUrl: art(show.id) })));
 const all = movies.concat(series, live, episodes);
+let movieCatalog: Item[] = movies;
+let seriesCatalog: Item[] = series;
+let liveCatalog: Item[] = live;
+let episodeCatalog: Item[] = episodes;
+let categories: Array<{ id: string; name: string; kind: 'movie' | 'series' | 'live' }> = [];
+let provider: ProviderCredentials | null = null;
+let providerState: { status: string; lastSuccessAt?: string; lastError?: string; rowCount?: number } = { status: 'demo' };
+let syncRunning = false;
+const asItem = (record: CatalogRecord): Item => ({ ...record, description: record.description || '' });
+const providerRecords = async (credentials: ProviderCredentials, action: string): Promise<Record<string, unknown>[]> => {
+  const value = await requestProvider(credentials, action);
+  return Array.isArray(value) ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object') : [];
+};
+async function syncProviderCatalog(): Promise<void> {
+  if (!provider || syncRunning) return;
+  syncRunning = true; providerState = { ...providerState, status: 'syncing', lastError: undefined };
+  try {
+    const credentials = provider;
+    const liveGroups = await providerRecords(credentials, 'get_live_categories');
+    const liveStreams = await providerRecords(credentials, 'get_live_streams');
+    const movieGroups = await providerRecords(credentials, 'get_vod_categories');
+    const movieStreams = await providerRecords(credentials, 'get_vod_streams');
+    const seriesGroups = await providerRecords(credentials, 'get_series_categories');
+    const seriesStreams = await providerRecords(credentials, 'get_series');
+    const mapped = (kind: 'live' | 'movie' | 'series', entries: Record<string, unknown>[]) => entries
+      .map((entry) => mapCatalogItem(kind, entry)).filter((item): item is CatalogRecord => !!item).map(asItem);
+    const nextLive = mapped('live', liveStreams), nextMovies = mapped('movie', movieStreams), nextSeries = mapped('series', seriesStreams);
+    if (!nextLive.length && !nextMovies.length && !nextSeries.length) throw new Error('Provider returned no catalog items. Check account access and provider response.');
+    movieCatalog = nextMovies; seriesCatalog = nextSeries; liveCatalog = nextLive;
+    categories = [
+      ...liveGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Live'), kind: 'live' as const })),
+      ...movieGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Movies'), kind: 'movie' as const })),
+      ...seriesGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Shows'), kind: 'series' as const }))
+    ];
+    const info = providerPlaybackInfo(credentials, await requestProvider(credentials, ''));
+    provider = { ...credentials, ...info };
+    episodeCatalog = [];
+    providerState = { status: 'success', lastSuccessAt: new Date().toISOString(), rowCount: nextLive.length + nextMovies.length + nextSeries.length };
+  } catch (error) {
+    providerState = { ...providerState, status: 'error', lastError: error instanceof Error ? error.message.slice(0, 160) : 'Catalog sync failed.' };
+  } finally { syncRunning = false; }
+}
 const profiles: Profile[] = [];
 const favorites = new Set<string>();
 const progress = new Map<string, { kind: string; id: string; positionSeconds: number; durationSeconds?: number; completed: boolean; updatedAt: number }>();
@@ -91,6 +135,37 @@ export function createDemoServer() {
   });
   const device = (request: { headers: Record<string, unknown> }) => String(request.headers['x-device-id']);
   const ownedProfile = (request: { headers: Record<string, unknown> }, id: string) => profiles.find((entry) => entry.id === id && entry.deviceId === device(request));
+  app.post('/api/v1/provider/connect', async (request, reply) => {
+    const body = request.body as { baseUrl?: string; username?: string; password?: string };
+    if (!body?.baseUrl || !body.username || !body.password) return reply.code(400).send({ error: { message: 'Server URL, username, and password are required.' } });
+    let baseUrl: string;
+    try {
+      const url = new URL(body.baseUrl);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+      baseUrl = url.origin + url.pathname.replace(/\/+$/, '');
+    } catch { return reply.code(400).send({ error: { message: 'Enter a valid provider URL.' } }); }
+    const credentials = { baseUrl, username: body.username.trim(), password: body.password };
+    if (!credentials.username || credentials.username.length > 128 || credentials.password.length > 256) return reply.code(400).send({ error: { message: 'Username or password is invalid.' } });
+    try {
+      const auth = await requestProvider(credentials, '');
+      const root = auth && typeof auth === 'object' ? auth as Record<string, unknown> : {};
+      const user = root.user_info && typeof root.user_info === 'object' ? root.user_info as Record<string, unknown> : {};
+      if (user.auth === 0 || String(user.status || '').toLowerCase() === 'disabled') return reply.code(401).send({ error: { message: 'Provider rejected this login.' } });
+      provider = { ...credentials, ...providerPlaybackInfo(credentials, auth) };
+      providerState = { status: 'connected' };
+      void syncProviderCatalog();
+      return { connected: true, username: credentials.username, status: 'syncing' };
+    } catch (error) {
+      const code = error instanceof Error && /HTTP 401|HTTP 403/.test(error.message) ? 401 : 502;
+      return reply.code(code).send({ error: { message: code === 401 ? 'Provider rejected this login.' : 'Could not reach the provider. Check the URL and network connection.' } });
+    }
+  });
+  app.get('/api/v1/provider/status', async () => ({ configured: !!provider, username: provider?.username, ...providerState }));
+  app.post('/api/v1/provider/sync', async (_request, reply) => {
+    if (!provider) return reply.code(409).send({ error: { message: 'Connect the provider first.' } });
+    if (syncRunning) return { status: 'syncing' };
+    void syncProviderCatalog(); return { status: 'syncing' };
+  });
   app.get('/api/v1/profiles', async (request) => ({ items: profiles.filter((entry) => entry.deviceId === device(request)).map(({ id, name }) => ({ id, name })) }));
   app.post('/api/v1/profiles', async (request, reply) => {
     const name = String((request.body as { name?: string })?.name || '').trim().slice(0, 24);
@@ -100,12 +175,22 @@ export function createDemoServer() {
   });
   app.get('/api/v1/home', async (request) => {
     const profileId = String((request.query as { profileId?: string }).profileId || '');
+    const activeItems = movieCatalog.concat(seriesCatalog, liveCatalog, episodeCatalog);
     const history = Array.from(progress.entries()).filter(([key, value]) => key.startsWith(`${profileId}:`) && !value.completed)
       .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
-      .map(([, value]) => ({ ...all.find((entry) => entry.id === value.id && entry.kind === value.kind)!, positionSeconds: value.positionSeconds })).filter((item) => item.id);
+      .map(([, value]) => ({ ...activeItems.find((entry) => entry.id === value.id && entry.kind === value.kind)!, positionSeconds: value.positionSeconds })).filter((item) => item.id);
     const saved = Array.from(favorites).filter((key) => key.startsWith(`${profileId}:`)).map((key) => {
-      const [kind, id] = key.slice(profileId.length + 1).split(':'); return all.find((entry) => entry.kind === kind && entry.id === id);
+      const [kind, id] = key.slice(profileId.length + 1).split(':'); return activeItems.find((entry) => entry.kind === kind && entry.id === id);
     }).filter((item): item is Item => !!item);
+    if (provider && providerState.status !== 'demo') return { featured: movieCatalog[0] || seriesCatalog[0] || null, rows: [
+      { id: 'continue', title: 'Continue Watching', items: history.slice(0, 12) },
+      { id: 'my-list', title: 'My List', items: saved.slice(0, 12) },
+      { id: 'recommended-movies', title: 'Movies', items: movieCatalog.slice(0, 12) },
+      { id: 'recommended-series', title: 'Shows', items: seriesCatalog.slice(0, 12) },
+      { id: 'recent-live', title: 'Live TV', items: liveCatalog.slice(0, 12) },
+      ...categories.map((category) => ({ id: `category:${category.kind}:${category.id}`, title: category.name,
+        items: (category.kind === 'movie' ? movieCatalog : category.kind === 'series' ? seriesCatalog : liveCatalog).filter((item) => item.categoryId === category.id).slice(0, 12) }))
+    ] };
     return { featured: movies[0], rows: [
       { id: 'continue', title: 'Continue Watching', items: history.slice(0, 12) },
       { id: 'my-list', title: 'My List', items: saved.slice(0, 12) },
@@ -117,26 +202,35 @@ export function createDemoServer() {
       { id: 'adventure', title: 'Adventure', items: movies.filter((item) => item.genre === 'Adventure') }
     ] };
   });
-  for (const [path, items] of [['movies', movies], ['series', series], ['live', live]] as const) {
-    app.get(`/api/v1/${path}`, async (request) => page(items, request.query as Record<string, unknown>));
-  }
-  for (const [path, items] of [['movies', movies], ['series', series]] as const) {
-    app.get(`/api/v1/${path}/:id`, async (request, reply) => items.find((item) => item.id === (request.params as { id: string }).id)
-      ?? reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Title not found.' } }));
-  }
-  app.get('/api/v1/series/:id/seasons', async (request) => ({ seasons: [{ number: 1, count: episodes.filter((item) => item.id.startsWith((request.params as { id: string }).id)).length }] }));
-  app.get('/api/v1/series/:id/seasons/:season/episodes', async (request) => page(episodes.filter((item) => item.id.startsWith((request.params as { id: string }).id)), request.query as Record<string, unknown>));
-  app.get('/api/v1/live/categories', async () => ({ items: [{ id: 'demo', name: 'Demo Channels' }] }));
+  app.get('/api/v1/movies', async (request) => page(movieCatalog, request.query as Record<string, unknown>));
+  app.get('/api/v1/series', async (request) => page(seriesCatalog, request.query as Record<string, unknown>));
+  app.get('/api/v1/live', async (request) => page(liveCatalog, request.query as Record<string, unknown>));
+  app.get('/api/v1/movies/:id', async (request, reply) => movieCatalog.find((item) => item.id === (request.params as { id: string }).id) ?? reply.code(404).send({ error: { message: 'Title not found.' } }));
+  app.get('/api/v1/series/:id', async (request, reply) => seriesCatalog.find((item) => item.id === (request.params as { id: string }).id) ?? reply.code(404).send({ error: { message: 'Title not found.' } }));
+  app.get('/api/v1/series/:id/seasons', async (request) => {
+    const id = (request.params as { id: string }).id;
+    if (provider && !episodeCatalog.some((item) => item.parentId === id)) {
+      try {
+        const info = await requestProvider(provider, 'get_series_info', { series_id: id });
+        if (info && typeof info === 'object') episodeCatalog.push(...mapEpisodes(id, info as Record<string, unknown>).map(asItem));
+      } catch { /* Catalog details remain available without episodes. */ }
+    }
+    const seasons = new Map<number, number>();
+    episodeCatalog.filter((item) => item.parentId === id).forEach((item) => seasons.set(item.seasonNumber || 0, (seasons.get(item.seasonNumber || 0) || 0) + 1));
+    return { seasons: Array.from(seasons.entries()).map(([number, count]) => ({ number, count })) };
+  });
+  app.get('/api/v1/series/:id/seasons/:season/episodes', async (request) => page(episodeCatalog.filter((item) => item.parentId === (request.params as { id: string }).id && String(item.seasonNumber) === String((request.params as { season: string }).season)), request.query as Record<string, unknown>));
+  app.get('/api/v1/live/categories', async () => ({ items: categories.filter((item) => item.kind === 'live') }));
   app.get('/api/v1/search', async (request) => {
     const q = String((request.query as { q?: string }).q || '').toLowerCase();
-    return { movies: movies.filter((item) => item.title.toLowerCase().includes(q)).slice(0, 10),
-      series: series.filter((item) => item.title.toLowerCase().includes(q)).slice(0, 10), page: 1 };
+    return { movies: movieCatalog.filter((item) => item.title.toLowerCase().includes(q)).slice(0, 10),
+      series: seriesCatalog.filter((item) => item.title.toLowerCase().includes(q)).slice(0, 10), page: 1 };
   });
   app.get('/api/v1/profiles/:id/my-list', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     if (!ownedProfile(request, id)) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     return { items: Array.from(favorites).filter((key) => key.startsWith(`${id}:`)).map((key) => {
-      const [kind, itemId] = key.slice(id.length + 1).split(':'); return all.find((item) => item.kind === kind && item.id === itemId);
+      const [kind, itemId] = key.slice(id.length + 1).split(':'); return movieCatalog.concat(seriesCatalog, liveCatalog, episodeCatalog).find((item) => item.kind === kind && item.id === itemId);
     }).filter(Boolean) };
   });
   app.post('/api/v1/profiles/:id/my-list', async (request, reply) => {
@@ -160,8 +254,18 @@ export function createDemoServer() {
     progress.set(profileKey(id, body.kind, body.id), { ...body, updatedAt: Date.now() });
     return { saved: true };
   });
-  app.post('/api/v1/playback/resolve', async () => ({ url: 'http://127.0.0.1:8080/demo-video', format: 'mp4' }));
-  app.get('/api/v1/sync/status', async () => ({ datasets: [
+  app.post('/api/v1/playback/resolve', async (request, reply) => {
+    const body = request.body as { kind: 'live' | 'movie' | 'episode'; id: string; format?: 'm3u8' | 'ts' };
+    if (provider) {
+      const item = movieCatalog.concat(seriesCatalog, liveCatalog, episodeCatalog).find((entry) => entry.kind === body.kind && entry.id === body.id);
+      if (!item) return reply.code(404).send({ error: { message: 'Stream not found.' } });
+      return { url: playbackUrl(provider, item, body.format), format: body.format || item.streamExtension || 'm3u8' };
+    }
+    return { url: 'http://127.0.0.1:8080/demo-video', format: 'mp4' };
+  });
+  app.get('/api/v1/sync/status', async () => ({ datasets: provider ? [
+    { dataset: 'catalog', status: providerState.status, rowCount: providerState.rowCount, lastSuccessAt: providerState.lastSuccessAt, lastError: providerState.lastError }
+  ] : [
     { dataset: 'movie', status: 'demo', rowCount: movies.length }, { dataset: 'series', status: 'demo', rowCount: series.length },
     { dataset: 'live', status: 'demo', rowCount: live.length }, { dataset: 'episodes', status: 'demo', rowCount: episodes.length }
   ] }));
