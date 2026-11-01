@@ -310,6 +310,28 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 /* Older webOS engines draw CSS outlines as square corners. Use a shadow ring,
    which follows each control's border radius on both the C9 and newer TVs. */
 .webos-client #central-app button:focus,.webos-client #central-app input:focus:not([type="range"]),.webos-client #central-app select:focus,.webos-client #central-app textarea:focus,.webos-client #central-setup button:focus,.webos-client #central-setup input:focus,.webos-client #central-player button:focus{outline:0!important;box-shadow:0 0 0 2px var(--brand-cyan)!important}
+.central-next-episode{position:absolute;z-index:120;left:50%;bottom:178px;display:flex;align-items:center;gap:20px;width:min(650px,calc(100vw - 40px));padding:17px 20px;transform:translateX(-50%);border:1px solid rgba(255,255,255,.24);border-radius:10px;background:rgba(14,16,22,.94);box-shadow:0 10px 35px rgba(0,0,0,.72);color:#fff}
+.central-next-episode.hidden{display:none}
+.central-next-episode-copy{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:4px}
+.central-next-episode-copy strong{font-size:17px;color:#ccc}
+.central-next-episode-copy span{overflow:hidden;font-size:21px;font-weight:800;text-overflow:ellipsis;white-space:nowrap}
+.central-next-episode-progress{position:absolute;right:10px;bottom:5px;left:10px;height:4px;overflow:hidden;border-radius:4px;background:rgba(255,255,255,.22)}
+.central-next-episode-progress>div{width:0;height:100%;background:var(--brand-cyan);transition:width .15s linear}
+.central-next-episode-actions{display:flex;flex:0 0 auto;gap:9px}
+.central-next-episode-actions button{min-height:44px;padding:9px 15px;border:1px solid rgba(255,255,255,.32);border-radius:5px;background:#30343d;color:#fff;font-size:15px;font-weight:800;white-space:nowrap}
+.central-next-episode-actions #central-next-episode-play{background:var(--brand-cyan);border-color:var(--brand-cyan);color:#081016}
+.central-next-episode-actions button:focus{outline:2px solid var(--brand-cyan)!important;outline-offset:2px}
+@media(max-width:650px){.central-next-episode{bottom:142px;flex-wrap:wrap;gap:10px;width:calc(100vw - 30px);padding:13px 14px}.central-next-episode-copy{flex-basis:100%}.central-next-episode-copy strong{font-size:14px}.central-next-episode-copy span{font-size:17px}.central-next-episode-actions{width:100%}.central-next-episode-actions button{flex:1 1 0;min-height:40px;font-size:14px}}
+.central-detail{position:relative;z-index:8;overflow:visible}
+.central-detail-body{position:relative;z-index:12;box-sizing:border-box;overflow:visible;padding:10px 14px 14px 10px}
+.central-detail-back{position:relative;z-index:13;margin:8px 0 26px 6px;padding:10px 12px}
+.central-detail-actions{position:relative;z-index:13;overflow:visible;margin:25px 0 0 6px;padding:6px 8px}
+.central-detail-actions button{position:relative;z-index:14;margin:2px}
+.central-series-detail{position:relative;z-index:8;overflow:visible}
+.central-series-detail .central-detail-body{z-index:12;overflow:visible!important;padding:10px 14px 14px 10px!important}
+.webos-client .central-detail-body{overflow:visible!important}
+.webos-client .central-series-detail .central-detail-body{overflow:visible!important}
+@media(max-width:650px){.central-detail-body{padding:8px 10px 12px 8px}.central-detail-back{margin:6px 0 18px 4px}.central-detail-actions{margin:12px 0 0 4px}}
 .webos-client #central-app .central-card:focus{border-color:var(--brand-cyan)!important;box-shadow:0 0 0 2px var(--brand-cyan),0 10px 35px rgba(0,0,0,.9)!important}
 .webos-client #central-app .central-settings-nav-item:focus,.webos-client #central-app .central-settings-nav-item:focus-visible{box-shadow:0 0 0 2px var(--brand-cyan)!important}
 .webos-client #central-app .central-settings-nav-item[aria-current="page"]:focus,.webos-client #central-app .central-settings-nav-item[aria-current="page"]:focus-visible{box-shadow:0 0 0 2px var(--brand-cyan),inset 0 3px 7px rgba(0,0,0,.82)!important}
