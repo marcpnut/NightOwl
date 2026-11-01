@@ -8,5 +8,7 @@ if (process.argv[2] === 'webos') {
     const withClientClass = attrs.replace(/\bclass="([^"]*)"/i, (_class, value) => `class="${value} webos-client"`);
     return `<body${withClientClass}>`;
   });
+  html = html.replace(/<script defer src="([^\"]*assets\/app\.js)"><\/script>/i,
+    (_all, src) => `<script defer src="./webOSTV.js"></script>\n  <script defer src="${src}"></script>`);
 }
 await writeFile(file, html);

@@ -76,6 +76,10 @@ type BrowseCategory = { id: string; name: string; type?: string; itemCount?: num
 type AppLanguage = { code: string; name: string };
 type Config = { url: string; token: string };
 type View = 'home' | 'whats-new' | 'movies' | 'series' | 'live' | 'my-list' | 'search' | 'settings' | 'detail' | 'profiles' | 'database';
+type WebOsLunaResponse = { sourceInfo?: unknown; error?: { errorCode?: number }; returnValue?: boolean; errorText?: string };
+type WebOsLunaRequest = { method: string; parameters: Record<string, unknown>; onSuccess: (response: WebOsLunaResponse) => void; onFailure: () => void };
+type WebOsRuntime = Window & { webOS?: { service?: { request: (uri: string, request: WebOsLunaRequest) => unknown } } };
+type WebOsVideoElement = HTMLVideoElement & { mediaId?: string };
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const centralFullscreenButton = el<HTMLButtonElement>('central-fullscreen');
@@ -189,6 +193,11 @@ let externalSubtitleBlobUrl = '';
 let activeLiveFormat: 'm3u8' | 'ts' = 'm3u8';
 let activeRemuxMode: 'copy' | 'transcode' | null = null;
 let remuxTranscodeAttempted = false;
+let activeDirectOriginalPlayback = false;
+let directOriginalPlaybackHasStarted = false;
+let directPlaybackWatchdog = 0;
+let pendingWebOsSeekSeconds: number | null = null;
+let pendingWebOsSeekTimer = 0;
 let playerControlsTimer = 0;
 const watched = new Map<string, number>();
 const favorites = new Set<string>();
@@ -201,6 +210,71 @@ const viewCacheLifetime = 5 * 60_000;
 const cacheableViews = new Set<View>(['home', 'movies', 'series']);
 const categoryViewScrollHandlers = new Map<View, () => void>();
 let activeCategoryPageScrollHandler: (() => void) | null = null;
+function webOsService(): NonNullable<WebOsRuntime['webOS']>['service'] | null {
+  if (!document.body.classList.contains('webos-client')) return null;
+  return (window as WebOsRuntime).webOS?.service ?? null;
+}
+function webOsMediaId(): string {
+  const mediaId = (video as WebOsVideoElement).mediaId?.trim() ?? '';
+  return mediaId && mediaId !== '<invalid mediaId>' ? mediaId : '';
+}
+function startWebOsPlayback(): Promise<void> {
+  video.load();
+  const service = webOsService();
+  if (!service) return video.play();
+  return new Promise<void>((resolve, reject) => {
+    let started = false;
+    let playIssued = false;
+    let attempts = 0;
+    let pollTimer = 0;
+    let startTimer = 0;
+    const playNow = (): void => {
+      if (playIssued) return;
+      playIssued = true;
+      video.load();
+      try {
+        const result = video.play();
+        if (result && typeof result.then === 'function') result.then(() => resolve(), reject);
+        else resolve();
+      } catch (error) { reject(error); }
+    };
+    const unsubscribeAndPlay = (): void => {
+      if (started) return;
+      started = true;
+      window.clearTimeout(pollTimer);
+      window.clearTimeout(startTimer);
+      const mediaId = webOsMediaId();
+      if (!mediaId) { playNow(); return; }
+      const playAfterUnsubscribe = (): void => playNow();
+      try {
+        service.request('luna://com.webos.media', {
+          method: 'unsubscribe', parameters: { mediaId },
+          onSuccess: playAfterUnsubscribe, onFailure: playAfterUnsubscribe
+        });
+        window.setTimeout(playAfterUnsubscribe, 500);
+      } catch { playNow(); }
+    };
+    const subscribeWhenReady = (): void => {
+      if (started) return;
+      const mediaId = webOsMediaId();
+      if (mediaId) {
+        try {
+          service.request('luna://com.webos.media', {
+            method: 'subscribe', parameters: { subscribe: true, mediaId },
+            onSuccess: (response) => { if (response.sourceInfo || response.error) unsubscribeAndPlay(); },
+            onFailure: unsubscribeAndPlay
+          });
+        } catch { unsubscribeAndPlay(); }
+        return;
+      }
+      attempts += 1;
+      if (attempts >= 10) { unsubscribeAndPlay(); return; }
+      pollTimer = window.setTimeout(subscribeWhenReady, 300);
+    };
+    startTimer = window.setTimeout(unsubscribeAndPlay, 5_000);
+    pollTimer = window.setTimeout(subscribeWhenReady, 0);
+  });
+}
 function playbackClock(seconds: number): string {
   if (!Number.isFinite(seconds)) return 'LIVE';
   const value = Math.max(0, Math.floor(seconds));
@@ -1890,8 +1964,25 @@ function playFollowingEpisodeNow(): void {
     await play({ ...next, kind: 'episode' });
   })();
 }
+async function fallbackOriginalPlaybackToRemux(item: Item, liveFormat: 'm3u8' | 'ts', resumeAt?: number): Promise<void> {
+  window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
+  activeDirectOriginalPlayback = false;
+  activeRemuxMode = 'copy';
+  remuxTranscodeAttempted = true;
+  playerStatus.textContent = 'Trying server compatibility remux…';
+  try {
+    const ticket = await api<{ url: string }>('/playback/remux-ticket', { kind: item.kind, id: item.streamId ?? item.id });
+    remuxTranscodeAttempted = false;
+    await play(item, liveFormat, resumeAt, `${config!.url}${ticket.url}`);
+  } catch (error) {
+    playerStatus.textContent = errorMessage(error);
+    revealPlayerControls();
+  }
+}
 async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: number, sourceOverride?: string, forceVideoTranscode = false): Promise<void> {
   try {
+    window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
+    activeDirectOriginalPlayback = false; directOriginalPlaybackHasStarted = false;
     let playableItem = item;
     // Featured and shelf cards only carry compact catalog metadata. Hydrate the
     // movie once so the in-player language menu has the same provider variants
@@ -1933,33 +2024,48 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     revealPlayerControls();
     let sourceUrl: string;
     const requiresRemux = playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
-    activeRemuxMode = requiresRemux ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
+    const tryOriginalStreamFirst = requiresRemux && !sourceOverride && !forceVideoTranscode;
+    activeDirectOriginalPlayback = false;
+    activeRemuxMode = requiresRemux && !tryOriginalStreamFirst ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
     remuxTranscodeAttempted = forceVideoTranscode;
     if (sourceOverride) sourceUrl = sourceOverride;
-    else if (requiresRemux) {
-      const ticket = await api<{ url: string }>('/playback/remux-ticket', { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, transcode: forceVideoTranscode });
-      sourceUrl = `${config!.url}${ticket.url}`;
-    }
     else sourceUrl = (await api<{ url: string }>(`/playback/resolve`, { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, format: playableItem.kind === 'live' ? liveFormat : undefined })).url;
     const stream = new URL(sourceUrl);
     if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Unsupported stream URL.');
     lastProgressSave = 0; activeLiveFormat = liveFormat;
     playerStatus.textContent = 'Buffering…';
     video.src = sourceUrl;
-    video.load();
+    activeDirectOriginalPlayback = tryOriginalStreamFirst;
+    if (tryOriginalStreamFirst) {
+      directPlaybackWatchdog = window.setTimeout(() => {
+        if (activeDirectOriginalPlayback && !directOriginalPlaybackHasStarted && playingItem) {
+          const resumePosition = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
+          void fallbackOriginalPlaybackToRemux(playingItem, activeLiveFormat, resumePosition);
+        }
+      }, 15_000);
+    }
     updatePlaybackProgress();
     const position = resumeAt ?? watched.get(`${playableItem.kind}:${playableItem.id}`) ?? playableItem.positionSeconds ?? 0;
     video.onloadedmetadata = () => {
-      if (position > 0) { try { video.currentTime = position; } catch { /* Live streams may not seek. */ } }
+      if (position > 0) {
+        if (document.body.classList.contains('webos-client')) seekTo(position);
+        else { try { video.currentTime = position; } catch { /* Live streams may not seek. */ } }
+      }
       updatePlaybackProgress();
       updatePlayerOptionVisibility();
       updateNextEpisodePrompt();
     };
-    await video.play();
+    if (document.body.classList.contains('webos-client')) await startWebOsPlayback();
+    else { video.load(); await video.play(); }
     revealPlayerControls();
     el<HTMLButtonElement>('central-play-pause').focus();
   } catch (error) {
     if (item.kind === 'live' && liveFormat === 'm3u8' && errorMessage(error).includes('HTTP 422')) { await play(item, 'ts'); return; }
+    if (playingItem && activeDirectOriginalPlayback) {
+      const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
+      await fallbackOriginalPlaybackToRemux(playingItem, liveFormat, resumeAt);
+      return;
+    }
     playerStatus.textContent = errorMessage(error); revealPlayerControls();
   }
 }
@@ -1973,6 +2079,10 @@ async function saveProgress(completed = false): Promise<void> {
 }
 function closePlayer(save = true): void {
   if (player.classList.contains('hidden')) return;
+  activeDirectOriginalPlayback = false;
+  directOriginalPlaybackHasStarted = false;
+  window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
+  window.clearTimeout(pendingWebOsSeekTimer); pendingWebOsSeekTimer = 0; pendingWebOsSeekSeconds = null;
   const liveItemToPreview = playingItem?.kind === 'live' && view === 'live' && content.querySelector('.central-live-preview') ? playingItem : null;
   window.clearTimeout(playerControlsTimer); player.classList.remove('controls-hidden');
   resetEpisodeAutoplay();
@@ -2409,9 +2519,39 @@ el<HTMLButtonElement>('central-rewind').onclick = () => { seekBy(-10); revealPla
 el<HTMLButtonElement>('central-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
 function seekTo(seconds: number): void {
   if (!Number.isFinite(video.duration) || video.duration <= 0) return;
-  try { video.currentTime = Math.max(0, Math.min(video.duration, seconds)); updatePlaybackProgress(); } catch { /* Some live streams do not expose a seekable range. */ }
+  const target = Math.max(0, Math.min(video.duration, seconds));
+  const service = webOsService();
+  const mediaId = webOsMediaId();
+  if (service && mediaId) {
+    pendingWebOsSeekSeconds = target;
+    window.clearTimeout(pendingWebOsSeekTimer);
+    pendingWebOsSeekTimer = window.setTimeout(() => {
+      const seekTarget = pendingWebOsSeekSeconds;
+      pendingWebOsSeekSeconds = null;
+      if (seekTarget === null) return;
+      const wasPlaying = !video.paused;
+      if (wasPlaying) video.pause();
+      const finishSeek = (success: boolean): void => {
+        if (!success) {
+          try { video.currentTime = seekTarget; } catch { /* The TV media service remains the preferred seek path. */ }
+        }
+        window.setTimeout(() => {
+          updatePlaybackProgress();
+          if (wasPlaying) void video.play();
+        }, 120);
+      };
+      try {
+        service.request('luna://com.webos.media', {
+          method: 'seek', parameters: { mediaId, position: Math.round(seekTarget * 1000) },
+          onSuccess: () => finishSeek(true), onFailure: () => finishSeek(false)
+        });
+      } catch { finishSeek(false); }
+    }, 180);
+    return;
+  }
+  try { video.currentTime = target; updatePlaybackProgress(); } catch { /* Some live streams do not expose a seekable range. */ }
 }
-function seekBy(seconds: number): void { seekTo(video.currentTime + seconds); }
+function seekBy(seconds: number): void { seekTo((pendingWebOsSeekSeconds ?? video.currentTime) + seconds); }
 const seekTrack = el<HTMLInputElement>('central-player-track');
 function updatePlayerOptionVisibility(): void {
   const live = playingItem?.kind === 'live';
@@ -2614,7 +2754,14 @@ video.onended = () => {
   void saveProgress(true); closePlayer(false);
 };
 video.onerror = () => {
+  window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
   if (playingItem?.kind === 'live' && activeLiveFormat === 'm3u8') { const item = playingItem; playingItem = null; void play(item, 'ts'); return; }
+  if (playingItem && activeDirectOriginalPlayback) {
+    const item = playingItem;
+    const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
+    void fallbackOriginalPlaybackToRemux(item, activeLiveFormat, resumeAt);
+    return;
+  }
   if (playingItem && activeRemuxMode === 'copy' && !remuxTranscodeAttempted && (video.error?.code === MediaError.MEDIA_ERR_DECODE || video.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
     const item = playingItem; const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
     remuxTranscodeAttempted = true; playerStatus.textContent = 'Trying compatibility conversion…';
@@ -2623,7 +2770,11 @@ video.onerror = () => {
   if (playingItem) { playerStatus.textContent = 'This stream could not play. Check the stream format or TV codec support.'; revealPlayerControls(); }
 };
 video.onwaiting = () => { playerStatus.textContent = 'Buffering…'; revealPlayerControls(); };
-video.onplaying = () => { playerStatus.textContent = ''; updatePlayerOptionVisibility(); revealPlayerControls(); };
+video.onplaying = () => {
+  window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
+  if (activeDirectOriginalPlayback) directOriginalPlaybackHasStarted = true;
+  playerStatus.textContent = ''; updatePlayerOptionVisibility(); revealPlayerControls();
+};
 video.onclick = () => {
   if (player.classList.contains('controls-hidden')) revealPlayerControls();
   else if (video.paused) void video.play(); else video.pause();
