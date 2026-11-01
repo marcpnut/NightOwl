@@ -4,7 +4,7 @@
   <div id="central-setup" class="central-setup hidden">
     <img class="central-setup-logo" src="./nightowl-logo.png?v=2" alt="NightOwl" width="320" height="82" />
     <h1>Sign in</h1><p>Sign in to your NightOwl account.</p>
-    <form id="central-form"><label>Username<input id="central-username" type="text" minlength="3" maxlength="64" autocomplete="username" required></label>
+    <form id="central-form"><label class="webos-server-address">Server address<input id="central-server-address" type="url" inputmode="url" autocomplete="url" placeholder="https://your-server.example" /></label><label>Username<input id="central-username" type="text" minlength="3" maxlength="64" autocomplete="username" required></label>
       <label>Password<input id="central-password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required></label>
       <button class="primary" type="submit">Sign in</button><p id="central-setup-error" role="status"></p></form>
   </div>
@@ -36,3 +36,4 @@
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body></html>
+

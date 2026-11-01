@@ -647,8 +647,8 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   }
   return request;
 }
-async function loginWithAccount(username: string, password: string): Promise<Config> {
-  const url = import.meta.env.VITE_NIGHTOWL_SERVER_URL || location.origin;
+async function loginWithAccount(username: string, password: string, serverAddress = ''): Promise<Config> {
+  const url = (serverAddress.trim() || import.meta.env.VITE_NIGHTOWL_SERVER_URL || location.origin).replace(/\/+$/, '');
   const response = await fetch(`${url}/api/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
@@ -2494,12 +2494,15 @@ el<HTMLFormElement>('central-form').onsubmit = (event) => {
   event.preventDefault();
   const username = el<HTMLInputElement>('central-username').value.trim();
   const password = el<HTMLInputElement>('central-password').value;
+  const isWebOsLogin = document.body.classList.contains('webos-client');
+  const serverAddress = isWebOsLogin ? el<HTMLInputElement>('central-server-address').value.trim() : '';
   const button = document.querySelector<HTMLButtonElement>('#central-form button[type="submit"]');
   if (button) button.disabled = true;
   el('central-setup-error').textContent = 'Signing in…';
   void (async () => {
     try {
-      const session = await loginWithAccount(username, password);
+      if (isWebOsLogin && !serverAddress) throw new Error('Enter the NightOwl server address.');
+      const session = await loginWithAccount(username, password, serverAddress);
       await connect(session);
       el<HTMLInputElement>('central-username').value = '';
       el<HTMLInputElement>('central-password').value = '';
