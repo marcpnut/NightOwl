@@ -36,6 +36,12 @@ export async function migrate(): Promise<void> {
   await pool.query(await readFile(sessionFile, 'utf8'));
   const webAccountFile = fileURLToPath(new URL('../database/011_web_accounts.sql', import.meta.url));
   await pool.query(await readFile(webAccountFile, 'utf8'));
+  const sharedProfilesFile = fileURLToPath(new URL('../database/013_shared_profiles.sql', import.meta.url));
+  await pool.query(await readFile(sharedProfilesFile, 'utf8'));
+  const profileSelectionFile = fileURLToPath(new URL('../database/014_profile_selection.sql', import.meta.url));
+  await pool.query(await readFile(profileSelectionFile, 'utf8'));
+  const liveFavoritesFile = fileURLToPath(new URL('../database/015_live_channel_favorites.sql', import.meta.url));
+  await pool.query(await readFile(liveFavoritesFile, 'utf8'));
 }
 
 export async function saveOpenSubtitlesApiKey(value: string, key: Buffer): Promise<void> {

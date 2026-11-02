@@ -69,7 +69,9 @@ type Item = { kind: Kind; id: string; title: string; description?: string; poste
   streamId?: string; canonicalId?: string; streams?: Array<{ id: string; providerId?: string; language?: string; languageCode?: string; extension?: string }>;
   seriesId?: string; seriesTitle?: string; highlightEpisodeCanonicalId?: string; highlightSeasonNumber?: number;
   metadata?: { language?: string; languageCode?: string; audio?: string; subtitles?: string; tmdbId?: string } };
-type Profile = { id: string; name: string; preferences?: { language?: string } };
+type ProfileSettings = { subtitleSearchLanguages: string[]; preferHearingImpairedSubtitles: boolean;
+  hiddenCategories: { live: string[]; movies: string[]; series: string[] } };
+type Profile = { id: string; name: string; isMain?: boolean; preferences?: { language?: string; settings?: ProfileSettings } };
 type Home = { featured: Item | null; discoverySource?: 'tmdb' | 'catalog'; attribution?: boolean; rows: Array<{ id: string; title: string; items: Item[] }> };
 type CatalogPage = { items: Item[]; hasMore: boolean };
 type BrowseCategory = { id: string; name: string; type?: string; itemCount?: number };
@@ -84,6 +86,10 @@ type WebOsVideoElement = HTMLVideoElement & { mediaId?: string };
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const centralFullscreenButton = el<HTMLButtonElement>('central-fullscreen');
 if (document.body.classList.contains('webos-client')) centralFullscreenButton.parentNode?.removeChild(centralFullscreenButton);
+if (!document.body.classList.contains('webos-client')) {
+  el<HTMLButtonElement>('central-play-pause').tabIndex = -1;
+  el<HTMLButtonElement>('central-play-pause').setAttribute('aria-hidden', 'true');
+}
 const setup = el('central-setup');
 const app = el('central-app');
 const content = el('central-content');
@@ -102,18 +108,27 @@ function makeScrollIndicatorUnselectable(button: HTMLButtonElement): void {
 }
 makeScrollIndicatorUnselectable(pageUpButton);
 makeScrollIndicatorUnselectable(pageDownButton);
-if (document.body.classList.contains('webos-client')) {
-  // Chromium 53 can leave the old remote focus ring visible after pointer
-  // hover. Transfer DOM focus on the delegated mouse event so only the tile
-  // under the pointer owns the focus styling.
-  content.addEventListener('mouseover', (event) => {
-    const target = (event.target as Element | null)?.closest<HTMLButtonElement>('.central-card');
-    if (!target || !content.contains(target) || document.activeElement === target) return;
-    const previous = document.activeElement as HTMLElement | null;
-    if (previous && content.contains(previous) && previous.matches('.central-card')) previous.blur();
-    target.focus();
-  });
+const pointerFocusableSelector = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function followPointerFocus(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return;
+  const control = target.closest<HTMLElement>(pointerFocusableSelector);
+  if (!control || control.closest('.central-page-scroll-controls,.central-shelf-arrow,.central-series-scroll-controls')
+    || (!content.contains(control) && !player.contains(control)) || control.closest('.hidden')
+    || control.getClientRects().length === 0) return;
+  document.body.classList.add('pointer-navigation');
+  document.body.classList.remove('dpad-navigation');
+  if (document.activeElement !== control) focusWithoutMovingScroll(control);
 }
+document.addEventListener('pointermove', (event) => {
+  if (event.pointerType === 'mouse' || event.pointerType === 'pen') followPointerFocus(event.target);
+}, { passive: true });
+// Mouse events cover older webOS Chromium builds without Pointer Events.
+document.addEventListener('mouseover', (event) => followPointerFocus(event.target), { passive: true });
+document.addEventListener('keydown', (event) => {
+  if (![37, 38, 39, 40].includes(event.keyCode)) return;
+  document.body.classList.add('dpad-navigation');
+  document.body.classList.remove('pointer-navigation');
+}, true);
 function renderProfileButton(): void {
   profileButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg>';
 }
@@ -143,6 +158,8 @@ let preferHearingImpairedSubtitles = localStorage.getItem('streamcinema.subtitle
 let view: View = 'home';
 let previousView: View = 'home';
 let lastFocus: HTMLElement | null = null;
+let playerReturnFocus: HTMLElement | null = null;
+let myCinemaNeedsRefresh = false;
 let restoreCardKey = '';
 let currentItem: Item | null = null;
 let playingItem: Item | null = null;
@@ -181,6 +198,53 @@ function readHiddenCategories(key: string): Set<string> {
 }
 let hiddenMovieCategoryIds = readHiddenCategories('streamcinema.hidden-movie-categories');
 let hiddenSeriesCategoryIds = readHiddenCategories('streamcinema.hidden-series-categories');
+const legacyDeviceProfileSettings: ProfileSettings = {
+  subtitleSearchLanguages: subtitleSearchLanguages.slice(),
+  preferHearingImpairedSubtitles,
+  hiddenCategories: { live: [...hiddenLiveCategoryIds], movies: [...hiddenMovieCategoryIds], series: [...hiddenSeriesCategoryIds] }
+};
+let profileSettingsWrite: Promise<void> = Promise.resolve();
+function currentProfileSettings(): ProfileSettings {
+  return { subtitleSearchLanguages: subtitleSearchLanguages.slice(), preferHearingImpairedSubtitles,
+    hiddenCategories: { live: [...hiddenLiveCategoryIds], movies: [...hiddenMovieCategoryIds], series: [...hiddenSeriesCategoryIds] } };
+}
+function applyProfileSettings(settings: ProfileSettings): void {
+  subtitleSearchLanguages = settings.subtitleSearchLanguages.filter((code) => availableLanguages.some((language) => language.code === code));
+  if (!subtitleSearchLanguages.length) subtitleSearchLanguages = [availableLanguages.some(({ code }) => code === 'en') ? 'en' : availableLanguages[0]?.code || 'en'];
+  preferHearingImpairedSubtitles = settings.preferHearingImpairedSubtitles;
+  hiddenLiveCategoryIds = new Set(settings.hiddenCategories.live);
+  hiddenMovieCategoryIds = new Set(settings.hiddenCategories.movies);
+  hiddenSeriesCategoryIds = new Set(settings.hiddenCategories.series);
+}
+function clearLegacyDeviceSettings(): void {
+  ['streamcinema.subtitle-languages', 'streamcinema.subtitle-hearing-impaired', 'streamcinema.hidden-live-categories',
+    'streamcinema.hidden-movie-categories', 'streamcinema.hidden-series-categories'].forEach((key) => localStorage.removeItem(key));
+}
+function saveProfileSettings(): Promise<void> {
+  if (!profile) return Promise.resolve();
+  const profileId = profile.id;
+  const settings = currentProfileSettings();
+  profile.preferences = { ...profile.preferences, settings };
+  profileSettingsWrite = profileSettingsWrite.catch(() => undefined).then(async () => {
+    await api(`/profiles/${profileId}/preferences`, { settings }, 'PUT');
+  }).catch((error) => { setStatus(`Could not sync settings to your account: ${errorMessage(error)}`); });
+  return profileSettingsWrite;
+}
+async function loadProfileSettings(selectedProfile: Profile): Promise<void> {
+  const settings = selectedProfile.preferences?.settings;
+  if (settings && Array.isArray(settings.subtitleSearchLanguages) && settings.hiddenCategories
+    && Array.isArray(settings.hiddenCategories.live) && Array.isArray(settings.hiddenCategories.movies)
+    && Array.isArray(settings.hiddenCategories.series)) {
+    applyProfileSettings(settings);
+    clearLegacyDeviceSettings();
+    return;
+  }
+  applyProfileSettings(legacyDeviceProfileSettings);
+  const initialSettings = currentProfileSettings();
+  selectedProfile.preferences = { ...selectedProfile.preferences, settings: initialSettings };
+  await api(`/profiles/${selectedProfile.id}/preferences`, { settings: initialSettings }, 'PUT');
+  clearLegacyDeviceSettings();
+}
 let selectedLiveSearch = '';
 let liveSearchTimer = 0;
 let liveSearchGeneration = 0;
@@ -196,9 +260,14 @@ let remuxTranscodeAttempted = false;
 let activeDirectOriginalPlayback = false;
 let directOriginalPlaybackHasStarted = false;
 let directPlaybackWatchdog = 0;
+let pendingRemuxRequest: { item: Item; liveFormat: 'm3u8' | 'ts'; resumeAt?: number } | null = null;
+let liveChannelItems: Item[] = [];
+let liveChannelPageLoader: (() => Promise<void>) | null = null;
+let selectedLiveChannelId = '';
 let pendingWebOsSeekSeconds: number | null = null;
 let pendingWebOsSeekTimer = 0;
 let playerControlsTimer = 0;
+let browserPlaybackIndicatorTimer = 0;
 const watched = new Map<string, number>();
 const favorites = new Set<string>();
 const catalogApiCache = new Map<string, { value: unknown; expiresAt: number }>();
@@ -282,20 +351,92 @@ function playbackClock(seconds: number): string {
   const secondText = `0${rest}`.slice(-2);
   return hours ? `${hours}:${`0${minutes}`.slice(-2)}:${secondText}` : `${minutes}:${secondText}`;
 }
+function playerLanguageCode(value?: string): string {
+  const key = (value || '').trim().toLowerCase().replace(/[_-].*$/, '');
+  if (!key || key === 'und' || key === 'unlabelled' || key === 'unknown') return '--';
+  const codes: Record<string, string> = {
+    english: 'EN', eng: 'EN', en: 'EN', dutch: 'NL', nederlands: 'NL', dut: 'NL', nld: 'NL', nl: 'NL',
+    polish: 'PL', pol: 'PL', pl: 'PL', german: 'DE', deu: 'DE', ger: 'DE', de: 'DE',
+    french: 'FR', fra: 'FR', fre: 'FR', fr: 'FR', spanish: 'ES', spa: 'ES', es: 'ES',
+    italian: 'IT', ita: 'IT', it: 'IT', portuguese: 'PT', por: 'PT', pt: 'PT',
+    turkish: 'TR', tur: 'TR', tr: 'TR', russian: 'RU', rus: 'RU', ru: 'RU',
+    ukrainian: 'UK', ukr: 'UK', uk: 'UK', arabic: 'AR', ara: 'AR', ar: 'AR',
+    hindi: 'HI', hin: 'HI', hi: 'HI', japanese: 'JA', jpn: 'JA', ja: 'JA',
+    korean: 'KO', kor: 'KO', ko: 'KO', chinese: 'ZH', zho: 'ZH', chi: 'ZH', zh: 'ZH',
+    swedish: 'SV', swe: 'SV', sv: 'SV', norwegian: 'NO', nor: 'NO', no: 'NO',
+    danish: 'DA', dan: 'DA', da: 'DA', finnish: 'FI', fin: 'FI', fi: 'FI',
+    czech: 'CS', ces: 'CS', cze: 'CS', cs: 'CS', romanian: 'RO', ron: 'RO', rum: 'RO', ro: 'RO',
+    greek: 'EL', ell: 'EL', gre: 'EL', el: 'EL', hebrew: 'HE', heb: 'HE', he: 'HE',
+    indonesian: 'ID', ind: 'ID', id: 'ID', thai: 'TH', tha: 'TH', th: 'TH',
+  };
+  return codes[key] || (/^[a-z]{2}$/i.test(key) ? key.toUpperCase() : /^[a-z]{3}$/i.test(key) ? key.slice(0, 2).toUpperCase() : '--');
+}
+function syncBrowserPlayerDetails(): void {
+  const title = el('central-browser-player-title');
+  const subtitle = el('central-browser-player-subtitle');
+  const status = el('central-browser-player-status');
+  const resolution = el('central-browser-player-resolution');
+  const subtitleTrack = el('central-browser-player-subtitle-track');
+  const languageBadge = el('central-browser-player-language');
+  const favorite = el<HTMLButtonElement>('central-browser-player-favorite');
+  if (!playingItem) {
+    title.textContent = ''; subtitle.textContent = ''; status.textContent = 'PAUSED';
+    resolution.textContent = ''; subtitleTrack.textContent = ''; languageBadge.textContent = '--';
+    favorite.setAttribute('aria-pressed', 'false');
+    favorite.setAttribute('aria-label', 'Add to My List');
+    return;
+  }
+  const item = playingItem;
+  const matchingSeriesTitle = item.kind === 'episode' && item.seriesId && currentItem?.kind === 'series' && currentItem.id === item.seriesId
+    ? currentItem.title : '';
+  const seriesName = normalizeDisplayTitle(item.seriesTitle || matchingSeriesTitle);
+  const episodeNumber = item.kind === 'episode' && item.seasonNumber !== undefined && item.episodeNumber !== undefined
+    ? `S${String(item.seasonNumber).padStart(2, '0')} E${String(item.episodeNumber).padStart(2, '0')}` : '';
+  title.textContent = item.kind === 'episode' && seriesName
+    ? `${episodeNumber ? `${episodeNumber} | ` : ''}${seriesName} — ${normalizeDisplayTitle(item.title)}`
+    : normalizeDisplayTitle(item.title);
+  const stream = item.streams?.find((entry) => (entry.providerId || entry.id) === (item.streamId || item.id));
+  const streamLanguage = playerLanguageCode(stream?.languageCode || stream?.language || item.metadata?.language);
+  languageBadge.textContent = streamLanguage;
+  subtitle.textContent = streamLanguage;
+  status.textContent = playerStatus.textContent?.trim() || (video.paused ? 'PAUSED' : 'PLAYING');
+  resolution.textContent = video.videoWidth && video.videoHeight ? `${video.videoWidth} × ${video.videoHeight}` : '';
+  let activeSubtitle = 0;
+  for (let index = 0; index < video.textTracks.length; index++) if (video.textTracks[index].mode === 'showing') { activeSubtitle = index + 1; break; }
+  subtitleTrack.textContent = activeSubtitle ? `SUB ${activeSubtitle}` : '';
+  const parentSeriesId = item.kind === 'episode'
+    ? item.seriesId || (currentItem?.kind === 'series' && currentItem.id === item.seriesId ? currentItem.id : undefined)
+    : undefined;
+  const target = item.kind === 'episode' && parentSeriesId
+    ? { kind: 'series' as Kind, id: parentSeriesId }
+    : { kind: item.kind, id: item.id };
+  const saved = favorites.has(`${target.kind}:${target.id}`);
+  favorite.setAttribute('aria-pressed', String(saved));
+  favorite.setAttribute('aria-label', saved ? 'Remove from My List' : 'Add to My List');
+  favorite.title = saved ? 'Remove from My List' : 'Add to My List';
+  el<HTMLButtonElement>('central-browser-player-restart').classList.toggle('hidden', item.kind === 'live');
+}
 function updatePlaybackProgress(): void {
-  el('central-player-time').textContent = playbackClock(video.currentTime);
+  const displayedPosition = pendingWebOsSeekSeconds ?? video.currentTime;
+  el('central-player-time').textContent = playbackClock(displayedPosition);
   el('central-player-duration').textContent = playbackClock(video.duration);
+  el('central-browser-player-time').textContent = playbackClock(displayedPosition);
+  el('central-browser-player-duration').textContent = playbackClock(video.duration);
   const percent = Number.isFinite(video.duration) && video.duration > 0
-    ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : 0;
-  const seekbar = el<HTMLInputElement>('central-player-track');
-  seekbar.style.setProperty('--progress-percent', `${percent}%`);
-  seekbar.value = `${Math.round(percent * Number(seekbar.max) / 100)}`;
-  seekbar.setAttribute('aria-valuenow', seekbar.value);
-  seekbar.setAttribute('aria-valuetext', `${playbackClock(video.currentTime)} of ${playbackClock(video.duration)}`);
+    ? Math.max(0, Math.min(100, displayedPosition / video.duration * 100)) : 0;
+  for (const id of ['central-player-track', 'central-browser-player-track']) {
+    const seekbar = el<HTMLInputElement>(id);
+    seekbar.style.setProperty('--progress-percent', `${percent}%`);
+    seekbar.value = `${Math.round(percent * Number(seekbar.max) / 100)}`;
+    seekbar.setAttribute('aria-valuenow', seekbar.value);
+    seekbar.setAttribute('aria-valuetext', `${playbackClock(displayedPosition)} of ${playbackClock(video.duration)}`);
+  }
+  syncBrowserPlayerDetails();
 }
 function revealPlayerControls(): void {
   window.clearTimeout(playerControlsTimer);
   player.classList.remove('controls-hidden');
+  syncBrowserPlayerDetails();
   if (player.classList.contains('hidden') || video.paused || !el('central-player-stream-menu').classList.contains('hidden')) return;
   playerControlsTimer = window.setTimeout(() => {
     playerControlsTimer = 0;
@@ -326,13 +467,19 @@ function ensureVerticalScrollControls(wrapper: HTMLElement, pane: HTMLElement): 
     const up = makeButton('up'), down = makeButton('down');
     root.append(up, down);
     controls = { root, up, down, update: () => {
+      const reservedSpace = wrapper.classList.contains('has-scroll-indicators') ? 84 : 0;
+      const contentOverflow = pane.scrollHeight - pane.clientHeight - reservedSpace;
+      const scrollable = contentOverflow > 2;
+      root.classList.toggle('hidden', !scrollable);
+      wrapper.classList.toggle('has-scroll-indicators', scrollable);
       const maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
-      root.classList.toggle('hidden', maxScroll <= 2);
-      up.classList.toggle('hidden', maxScroll <= 2 || pane.scrollTop <= 2);
-      down.classList.toggle('hidden', maxScroll <= 2 || pane.scrollTop >= maxScroll - 2);
+      up.classList.toggle('hidden', !scrollable || pane.scrollTop <= 2);
+      down.classList.toggle('hidden', !scrollable || pane.scrollTop >= maxScroll - 2);
     }};
     verticalScrollControls.set(pane, controls);
     pane.addEventListener('scroll', controls.update, { passive: true });
+    const contentObserver = new MutationObserver(controls.update);
+    contentObserver.observe(pane, { childList: true, subtree: true });
   }
   if (controls.root.parentNode !== wrapper) wrapper.appendChild(controls.root);
   controls.update();
@@ -457,6 +604,10 @@ if (document.body.classList.contains('webos-client')) {
 }
 function updatePageScrollControls(): void {
   const visible = !app.classList.contains('hidden') && player.classList.contains('hidden') && view !== 'profiles' && view !== 'settings';
+  if (view === 'my-list') {
+    pageScrollControls.classList.add('hidden');
+    return;
+  }
   const searchResults = view === 'search' ? content.querySelector<HTMLElement>('.central-search-results') : null;
   if (searchResults) {
     const maxScroll = Math.max(0, searchResults.scrollHeight - searchResults.clientHeight);
@@ -473,19 +624,24 @@ function updatePageScrollControls(): void {
   }
   const liveGrid = view === 'live' ? content.querySelector<HTMLElement>('.central-live-grid') : null;
   if (liveGrid) {
-    pageUpButton.style.removeProperty('top'); pageUpButton.style.removeProperty('bottom');
+    const gridRect = liveGrid.getBoundingClientRect();
     const maxScroll = Math.max(0, liveGrid.scrollHeight - liveGrid.clientHeight);
     pageScrollControls.classList.toggle('hidden', !visible || maxScroll < 24);
     pageUpButton.classList.toggle('hidden', liveGrid.scrollTop < 24);
     pageDownButton.classList.toggle('hidden', liveGrid.scrollTop >= maxScroll - 24);
+    pageUpButton.style.top = `${Math.max(74, gridRect.top + 8)}px`; pageUpButton.style.bottom = 'auto';
+    pageDownButton.style.top = 'auto'; pageDownButton.style.bottom = `${Math.max(12, window.innerHeight - gridRect.bottom + 8)}px`;
     return;
   }
   const scrollingElement = document.scrollingElement ?? document.documentElement;
-  const maxScroll = Math.max(0, Math.max(scrollingElement.scrollHeight, document.body.scrollHeight, content.scrollHeight) - window.innerHeight);
-  const currentScroll = Math.max(window.scrollY, scrollingElement.scrollTop, document.body.scrollTop);
-  pageScrollControls.classList.toggle('hidden', !visible || maxScroll < 24);
-  pageUpButton.classList.toggle('hidden', currentScroll < 24);
-  pageDownButton.classList.toggle('hidden', currentScroll >= maxScroll - 24);
+  const maxScroll = Math.max(0, scrollingElement.scrollHeight - window.innerHeight);
+  const currentScroll = Math.max(0, scrollingElement.scrollTop || window.scrollY);
+  const canScroll = maxScroll > 2;
+  pageScrollControls.classList.toggle('hidden', !visible || !canScroll);
+  pageUpButton.classList.toggle('hidden', !canScroll || currentScroll <= 2);
+  pageDownButton.classList.toggle('hidden', !canScroll || currentScroll >= maxScroll - 2);
+  pageUpButton.style.removeProperty('top'); pageUpButton.style.removeProperty('bottom');
+  pageDownButton.style.removeProperty('top'); pageDownButton.style.removeProperty('bottom');
   if (view === 'home' || view === 'whats-new' || view === 'movies' || view === 'series') {
     const headerBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
     const firstVisibleRow = Array.from(content.querySelectorAll<HTMLElement>('.central-row'))
@@ -599,7 +755,7 @@ function resetInlineLiveVideo(): void {
   }
   livePreviewLoader = null;
 }
-async function api<T>(path: string, body?: unknown): Promise<T> {
+async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PUT'): Promise<T> {
   if (!config) throw new Error('Connect to the catalog server first.');
   const cacheable = body === undefined && (/^\/home(?:\?|$)/.test(path) || /^\/(?:movies|series)(?:\/categories)?(?:\?|$)/.test(path));
   const cacheKey = `${config.url}|${config.token}|${path}`;
@@ -618,7 +774,7 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   const timeout = window.setTimeout(() => controller?.abort(), 15_000);
   const request = (async (): Promise<T> => {
     try {
-    const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST',
+    const response = await fetch(url, { method: method ?? (body === undefined ? 'GET' : 'POST'),
       headers: { Authorization: `Bearer ${config.token}`, 'X-Device-Id': deviceId, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller?.signal, cache: 'no-store' });
     if (response.status === 401) throw new Error('Your NightOwl sign-in session expired. Sign in again.');
@@ -646,6 +802,14 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
     void request.then(clearInflight, clearInflight);
   }
   return request;
+}
+async function resolvePlaybackSource(kind: 'live' | 'movie' | 'episode', id: string, format?: 'm3u8' | 'ts'): Promise<string> {
+  const resolved = await api<{ url: string }>('/playback/resolve', { kind, id, ...(kind === 'live' && format ? { format } : {}) });
+  if (kind === 'live' && location.protocol === 'https:' && !document.body.classList.contains('webos-client') && new URL(resolved.url).protocol === 'http:') {
+    const ticket = await api<{ url: string }>('/playback/proxy-ticket', { kind, id, format: format ?? 'm3u8' });
+    return new URL(ticket.url, `${config!.url}/`).toString();
+  }
+  return resolved.url;
 }
 async function loginWithAccount(username: string, password: string, serverAddress = ''): Promise<Config> {
   const url = (serverAddress.trim() || import.meta.env.VITE_NIGHTOWL_SERVER_URL || location.origin).replace(/\/+$/, '');
@@ -703,11 +867,14 @@ function navigate(next: View): void {
   document.body.classList.toggle('live-tv-open', next === 'live');
   app.classList.toggle('settings-open', next === 'settings');
   app.classList.toggle('search-open', next === 'search');
+  app.classList.toggle('my-cinema-open', next === 'my-list');
   document.documentElement.classList.toggle('settings-open', next === 'settings');
   document.body.classList.toggle('settings-open', next === 'settings');
   document.documentElement.classList.toggle('search-open', next === 'search');
   document.body.classList.toggle('search-open', next === 'search');
-  if (next === 'settings' || next === 'search') scrollWindowTo(0);
+  document.documentElement.classList.toggle('my-cinema-open', next === 'my-list');
+  document.body.classList.toggle('my-cinema-open', next === 'my-list');
+  if (next === 'settings' || next === 'search' || next === 'my-list') scrollWindowTo(0);
   if (next === 'profiles') scrollWindowTo(0);
   if (next !== 'detail' && next !== 'profiles') previousView = next;
   view = next;
@@ -1255,7 +1422,7 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
   if (section === 'live' && category && hiddenLiveCategoryIds.has(category)) category = '';
   const restoreLiveSearchFocus = section === 'live' && document.activeElement?.classList.contains('central-live-search');
   const generation = requestGeneration;
-  if (!append) { page = 1; loadedItems = []; setStatus(`Loading ${section}…`); }
+  if (!append) { page = 1; loadedItems = []; if (section === 'live') { liveChannelItems = []; liveChannelPageLoader = null; selectedLiveChannelId = ''; } setStatus(`Loading ${section}…`); }
   try {
     const countryQuery = section === 'live' && country ? `&country=${encodeURIComponent(country)}` : '';
     const excludedCategoriesQuery = section === 'live' && hiddenLiveCategoryIds.size ? `&excludeCategories=${encodeURIComponent([...hiddenLiveCategoryIds].join(','))}` : '';
@@ -1292,6 +1459,7 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
     if (generation !== requestGeneration) return;
     selectedCategoryBySection[section] = category;
     loadedItems = loadedItems.concat(result.items);
+    if (section === 'live') liveChannelItems = append ? liveChannelItems.concat(result.items) : result.items.slice();
     if (section === 'live' && video.parentElement?.classList.contains('central-live-preview')) resetInlineLiveVideo();
     clear(content);
     const liveScreen = section === 'live' ? node('section', 'central-live-screen') : null;
@@ -1308,6 +1476,7 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
       let selectedPreviewKey = '';
       const previewRequest = (): number => livePreviewGeneration;
       const updateLivePreview = (item: Item): void => {
+        selectedLiveChannelId = item.streamId ?? item.id;
         const urls = [...imageUrls(item.backdropUrl), ...imageUrls(item.posterUrl)];
         previewTitle.textContent = item.title;
         previewImage.classList.toggle('hidden', urls.length === 0 || (!video.paused && video.parentElement === preview));
@@ -1328,11 +1497,11 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
         try {
           let resolved: { url: string };
           let format: 'm3u8' | 'ts' = 'm3u8';
-          try { resolved = await api<{ url: string }>('/playback/resolve', { kind: 'live', id: item.streamId ?? item.id, format }); }
+          try { resolved = { url: await resolvePlaybackSource('live', item.streamId ?? item.id, format) }; }
           catch (error) {
             if (!errorMessage(error).includes('HTTP 422')) throw error;
             format = 'ts';
-            resolved = await api<{ url: string }>('/playback/resolve', { kind: 'live', id: item.streamId ?? item.id, format });
+            resolved = { url: await resolvePlaybackSource('live', item.streamId ?? item.id, format) };
           }
           if (request !== previewRequest() || view !== 'live' || video.parentElement !== preview) return;
           livePreviewSourceUrl = resolved.url;
@@ -1354,6 +1523,7 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
         const channelCard = card(item);
         channelCard.onclick = () => {
           const key = `${item.streamId ?? item.id}`;
+          selectedLiveChannelId = item.streamId ?? item.id;
           lastFocus = channelCard;
           if (selectedPreviewKey === key && video.parentElement === preview) {
             void play(item, livePreviewSourceFormat, undefined, livePreviewSourceUrl || undefined); return;
@@ -1463,6 +1633,7 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
             .then((result) => {
               if (generation !== liveSearchGeneration || view !== 'live') return;
               page = 1; livePage = 1; liveQuery = query; liveDataGeneration = generation; liveLoading = false; liveHasMore = result.hasMore; loadedItems = result.items;
+              liveChannelItems = result.items.slice(); selectedLiveChannelId = result.items[0]?.streamId ?? result.items[0]?.id ?? '';
               result.items.forEach((item) => grid.appendChild(makeLiveCard(item)));
               setStatus(result.items.length ? '' : query ? 'No channels match this search in the selected category.' : 'No items are available yet.');
               if (liveHasMore) void fetchLivePage();
@@ -1499,13 +1670,14 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
       try {
         const next = await api<CatalogPage>(`/live?page=${nextPage}&limit=20&language=${encodeURIComponent(appLanguage)}${selectedCategoryBySection.live ? `&category=${encodeURIComponent(selectedCategoryBySection.live)}` : ''}${selectedLiveCountry ? `&country=${encodeURIComponent(selectedLiveCountry)}` : ''}${queryString}${excludedCategoriesQuery}`);
         if (generation !== liveSearchGeneration || view !== 'live') return;
-        livePage = nextPage; page = nextPage; liveHasMore = next.hasMore; loadedItems = loadedItems.concat(next.items);
+        livePage = nextPage; page = nextPage; liveHasMore = next.hasMore; loadedItems = loadedItems.concat(next.items); liveChannelItems = liveChannelItems.concat(next.items);
         next.items.forEach((item) => liveGrid!.appendChild(makeLiveCard(item)));
         setStatus('');
       } catch (error) { if (generation === liveSearchGeneration && view === 'live') setStatus(errorMessage(error)); }
       finally { liveLoading = false; }
     };
     if (section === 'live') {
+      liveChannelPageLoader = fetchLivePage;
       grid.addEventListener('scroll', () => {
         updatePageScrollControls();
         if (grid.scrollHeight - grid.scrollTop - grid.clientHeight <= Math.max(240, grid.clientHeight * .8)) void fetchLivePage();
@@ -1541,13 +1713,29 @@ async function showMyList(): Promise<void> {
       api<Home>(`/home?profileId=${encodeURIComponent(profile.id)}&language=${encodeURIComponent(appLanguage)}`)
     ]);
     if (view !== 'my-list') return;
+    const items = await Promise.all(result.items.map(async (item): Promise<Item> => {
+      if (imageUrls(item.backdropUrl).length || imageUrls(item.posterUrl).length || !['movie', 'series'].includes(item.kind)) return item;
+      try {
+        const detail = await api<Item>(`/${item.kind === 'movie' ? 'movies' : 'series'}/${encodeURIComponent(item.id)}?language=${encodeURIComponent(appLanguage)}`);
+        return { ...item, posterUrl: detail.posterUrl || item.posterUrl, backdropUrl: detail.backdropUrl || item.backdropUrl };
+      } catch { return item; }
+    }));
+    if (view !== 'my-list') return;
     clear(content); content.appendChild(node('div', 'central-page-kicker', 'YOUR SPACE'));
-    content.appendChild(node('h1', 'central-page-title', 'My Cinema'));
+    content.appendChild(node('h1', 'central-page-title', `My Cinema - ${profile.name}`));
     const continueItems = home.rows.find((group) => group.id === 'continue')?.items || [];
     if (continueItems.length) content.appendChild(row('Continue Watching', continueItems));
-    if (result.items.length) content.appendChild(row('My List', result.items));
+    if (items.length) content.appendChild(row('My List', items));
     if (!continueItems.length && !result.items.length) content.appendChild(node('p', 'central-page-description', 'Titles you save or start watching will appear here.'));
-    focusReturnedCard(content);
+    restoreCardKey = '';
+    const firstShelfCard = content.querySelector<HTMLButtonElement>('.central-row .central-card');
+    const firstShelf = firstShelfCard?.closest<HTMLElement>('.central-cards');
+    if (firstShelfCard) {
+      if (firstShelf) firstShelf.scrollLeft = 0;
+      focusWithoutMovingScroll(firstShelfCard);
+    } else {
+      focusReturnedCard(content);
+    }
   } catch (error) { setStatus(errorMessage(error)); }
 }
 type DatabaseSummary = { counts: { movies: number; series: number; liveTv: number; episodes: number; episodeStreams?: number };
@@ -1809,11 +1997,22 @@ async function showEpisodes(seriesId: string, parent: HTMLElement, highlightEpis
       const button = node('button', 'central-more', `Season ${season.number} (${season.count})`) as HTMLButtonElement;
       button.type = 'button';
       button.setAttribute('aria-pressed', `${season.number === selectedSeason}`);
-      button.onclick = () => {
+      const selectSeason = async (focusFirstEpisode = false): Promise<void> => {
         selectedSeason = season.number;
         picker.querySelectorAll<HTMLButtonElement>('button').forEach((candidate) => candidate.setAttribute('aria-pressed', `${candidate === button}`));
-        clear(episodes); void loadEpisodePage(seriesId, season.number, 1, episodes);
+        clear(episodes);
+        await loadEpisodePage(seriesId, season.number, 1, episodes);
+        if (focusFirstEpisode) {
+          const firstEpisode = episodes.querySelector<HTMLButtonElement>('.central-episode');
+          if (firstEpisode) { focusWithoutMovingScroll(firstEpisode); firstEpisode.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+        }
       };
+      button.onclick = () => { void selectSeason(); };
+      button.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowRight' && event.keyCode !== 39) return;
+        event.preventDefault(); event.stopPropagation();
+        void selectSeason(true);
+      });
       picker.appendChild(button);
     }
     browser.append(seasonPane, episodePane); parent.appendChild(browser);
@@ -1840,7 +2039,7 @@ async function loadEpisodePage(seriesId: string, season: number, episodePage: nu
       if (episode.description) button.appendChild(node('small', undefined, episode.description));
       // The episode list endpoint returns episode metadata without the parent
       // series id. Preserve it here so the player can resolve the next episode.
-      button.onclick = () => void play({ ...episode, kind: 'episode', seriesId }); target.appendChild(button);
+      button.onclick = () => void play({ ...episode, kind: 'episode', seriesId, seriesTitle: currentItem?.id === seriesId ? currentItem.title : undefined }); target.appendChild(button);
     }
     const existingLoader = target.querySelector<HTMLElement>('.central-episode-sentinel');
     existingLoader?.remove();
@@ -1927,14 +2126,20 @@ async function advanceToFollowingEpisode(): Promise<void> {
   }
 }
 function updateNextEpisodePrompt(): void {
-  if (playingItem?.kind !== 'episode' || !nextEpisodeItem || episodeAutoplayDismissed || episodeAdvanceStarted
+  if (playingItem?.kind !== 'episode' || activeRemuxMode !== null) {
+    const active = document.activeElement;
+    if (!el('central-next-episode').classList.contains('hidden')) hideNextEpisodePrompt();
+    if (active === el('central-next-episode-play') || active === el('central-next-episode-cancel')) focusPlayerPlaybackControl();
+    return;
+  }
+  if (!nextEpisodeItem || episodeAutoplayDismissed || episodeAdvanceStarted
     || !Number.isFinite(video.duration) || video.duration <= 0) return;
   const remaining = video.duration - video.currentTime;
   if (remaining > NEXT_EPISODE_COUNTDOWN_SECONDS) {
     if (!el('central-next-episode').classList.contains('hidden')) {
       const active = document.activeElement;
       hideNextEpisodePrompt();
-      if (active === el('central-next-episode-play') || active === el('central-next-episode-cancel')) el<HTMLButtonElement>('central-play-pause').focus();
+      if (active === el('central-next-episode-play') || active === el('central-next-episode-cancel')) focusPlayerPlaybackControl();
     }
     return;
   }
@@ -1975,15 +2180,62 @@ async function fallbackOriginalPlaybackToRemux(item: Item, liveFormat: 'm3u8' | 
     remuxTranscodeAttempted = false;
     await play(item, liveFormat, resumeAt, `${config!.url}${ticket.url}`);
   } catch (error) {
-    playerStatus.textContent = errorMessage(error);
-    revealPlayerControls();
+    showPlaybackError(errorMessage(error));
   }
 }
+function hidePlaybackError(): void { el('central-playback-error').classList.add('hidden'); }
+function showPlaybackError(message: string): void {
+  closeRemuxPrompt();
+  playerStatus.textContent = message;
+  el('central-playback-error-message').textContent = message;
+  el('central-playback-error').classList.remove('hidden');
+  revealPlayerControls();
+  el<HTMLButtonElement>('central-playback-error-close').focus();
+}
+el<HTMLButtonElement>('central-playback-error-close').onclick = () => { hidePlaybackError(); revealPlayerControls(); };
+function closeRemuxPrompt(): void {
+  el('central-remux-prompt').classList.add('hidden');
+  pendingRemuxRequest = null;
+}
+function askToUseRemux(item: Item, liveFormat: 'm3u8' | 'ts', resumeAt?: number): void {
+  if (item.kind !== 'movie' && item.kind !== 'episode') return;
+  if (pendingRemuxRequest) return;
+  pendingRemuxRequest = { item, liveFormat, resumeAt };
+  playerStatus.textContent = 'Provider stream could not be played.';
+  const dialog = el('central-remux-prompt');
+  dialog.classList.remove('hidden');
+  revealPlayerControls();
+  el<HTMLButtonElement>('central-remux-confirm').focus();
+}
+el<HTMLButtonElement>('central-remux-confirm').onclick = () => {
+  const request = pendingRemuxRequest;
+  closeRemuxPrompt();
+  if (request) void fallbackOriginalPlaybackToRemux(request.item, request.liveFormat, request.resumeAt);
+};
+el<HTMLButtonElement>('central-remux-cancel').onclick = () => {
+  closeRemuxPrompt();
+  playerStatus.textContent = 'Provider stream could not be played.';
+  revealPlayerControls();
+};
 async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: number, sourceOverride?: string, forceVideoTranscode = false): Promise<void> {
+  hidePlaybackError();
+  const openingPlayer = player.classList.contains('hidden');
+  if (openingPlayer) {
+    const active = document.activeElement;
+    playerReturnFocus = active instanceof HTMLElement && active !== document.body && !player.contains(active)
+      ? active : lastFocus?.isConnected ? lastFocus : null;
+  }
   try {
     window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
     activeDirectOriginalPlayback = false; directOriginalPlaybackHasStarted = false;
     let playableItem = item;
+    if (item.kind === 'episode') {
+      const episodeStreamId = item.streamId || item.id;
+      try {
+        const parent = await api<{ seriesId?: string | null; seriesTitle?: string | null }>(`/episodes/${encodeURIComponent(episodeStreamId)}/parent`);
+        playableItem = { ...playableItem, seriesId: parent.seriesId || item.seriesId, seriesTitle: parent.seriesTitle || item.seriesTitle, streamId: episodeStreamId };
+      } catch { /* Retain the parent metadata already carried by the selected episode. */ }
+    }
     // Featured and shelf cards only carry compact catalog metadata. Hydrate the
     // movie once so the in-player language menu has the same provider variants
     // that are shown on its detail page.
@@ -1992,10 +2244,10 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
         const detail = await api<Item>(`/movies/${item.id}?language=${encodeURIComponent(appLanguage)}`);
         playableItem = { ...item, ...detail, id: item.id, streamId: item.streamId || detail.streamId };
       } catch { /* Keep direct playback available if metadata lookup fails. */ }
-    } else if (item.kind === 'episode' && !item.streams?.length) {
+    } else if (playableItem.kind === 'episode' && !playableItem.streams?.length) {
       try {
-        const variants = await api<{ items: NonNullable<Item['streams']> }>(`/episodes/${item.streamId ?? item.id}/streams?language=${encodeURIComponent(appLanguage)}`);
-        playableItem = { ...item, streams: variants.items, streamId: item.streamId ?? item.id };
+        const variants = await api<{ items: NonNullable<Item['streams']> }>(`/episodes/${playableItem.streamId ?? playableItem.id}/streams?language=${encodeURIComponent(appLanguage)}`);
+        playableItem = { ...playableItem, streams: variants.items, streamId: playableItem.streamId ?? playableItem.id };
       } catch { /* Keep episode playback available if the variant lookup fails. */ }
     }
     if (playableItem.kind === 'live') livePreviewGeneration += 1;
@@ -2022,28 +2274,19 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     el('central-playing-title').textContent = normalizeDisplayTitle(playableItem.title);
     player.classList.remove('hidden');
     revealPlayerControls();
+    if (openingPlayer) focusPlayerPlaybackControl();
     let sourceUrl: string;
-    const requiresRemux = playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
-    const tryOriginalStreamFirst = requiresRemux && !sourceOverride && !forceVideoTranscode;
     activeDirectOriginalPlayback = false;
-    activeRemuxMode = requiresRemux && !tryOriginalStreamFirst ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
+    activeRemuxMode = sourceOverride ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
     remuxTranscodeAttempted = forceVideoTranscode;
     if (sourceOverride) sourceUrl = sourceOverride;
-    else sourceUrl = (await api<{ url: string }>(`/playback/resolve`, { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, format: playableItem.kind === 'live' ? liveFormat : undefined })).url;
+    else sourceUrl = await resolvePlaybackSource(playableItem.kind as 'live' | 'movie' | 'episode', playableItem.streamId ?? playableItem.id, playableItem.kind === 'live' ? liveFormat : undefined);
     const stream = new URL(sourceUrl);
     if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Unsupported stream URL.');
     lastProgressSave = 0; activeLiveFormat = liveFormat;
     playerStatus.textContent = 'Buffering…';
     video.src = sourceUrl;
-    activeDirectOriginalPlayback = tryOriginalStreamFirst;
-    if (tryOriginalStreamFirst) {
-      directPlaybackWatchdog = window.setTimeout(() => {
-        if (activeDirectOriginalPlayback && !directOriginalPlaybackHasStarted && playingItem) {
-          const resumePosition = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
-          void fallbackOriginalPlaybackToRemux(playingItem, activeLiveFormat, resumePosition);
-        }
-      }, 15_000);
-    }
+    activeDirectOriginalPlayback = !sourceOverride;
     updatePlaybackProgress();
     const position = resumeAt ?? watched.get(`${playableItem.kind}:${playableItem.id}`) ?? playableItem.positionSeconds ?? 0;
     video.onloadedmetadata = () => {
@@ -2058,15 +2301,15 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     if (document.body.classList.contains('webos-client')) await startWebOsPlayback();
     else { video.load(); await video.play(); }
     revealPlayerControls();
-    el<HTMLButtonElement>('central-play-pause').focus();
+    if (openingPlayer) focusPlayerPlaybackControl();
   } catch (error) {
     if (item.kind === 'live' && liveFormat === 'm3u8' && errorMessage(error).includes('HTTP 422')) { await play(item, 'ts'); return; }
-    if (playingItem && activeDirectOriginalPlayback) {
+    if (playingItem && activeDirectOriginalPlayback && (playingItem.kind === 'movie' || playingItem.kind === 'episode')) {
       const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
-      await fallbackOriginalPlaybackToRemux(playingItem, liveFormat, resumeAt);
+      askToUseRemux(playingItem, liveFormat, resumeAt);
       return;
     }
-    playerStatus.textContent = errorMessage(error); revealPlayerControls();
+    showPlaybackError(errorMessage(error));
   }
 }
 async function saveProgress(completed = false): Promise<void> {
@@ -2077,9 +2320,46 @@ async function saveProgress(completed = false): Promise<void> {
   try { await api(`/profiles/${profile.id}/progress`, { kind: playingItem.kind, id: playingItem.id, positionSeconds, durationSeconds, completed }); invalidateHomeCache(); }
   catch { /* Playback continues if progress cannot be saved. */ }
 }
+async function togglePlayingItemFavorite(): Promise<void> {
+  if (!profile || !playingItem) return;
+  let target: { kind: 'movie' | 'series' | 'live'; id: string };
+  if (playingItem.kind === 'episode') {
+    let seriesId: string | undefined;
+    const episodeStreamId = playingItem.streamId || playingItem.id;
+    try {
+      const parent = await api<{ seriesId?: string | null }>(`/episodes/${encodeURIComponent(episodeStreamId)}/parent`);
+      seriesId = parent.seriesId || undefined;
+    } catch { /* Fall back to the parent ID attached to this specific episode item. */ }
+    seriesId = seriesId || playingItem.seriesId;
+    if (seriesId) playingItem.seriesId = seriesId;
+    if (!seriesId) {
+      playerStatus.textContent = 'Could not find the series for this episode.';
+      revealPlayerControls();
+      return;
+    }
+    target = { kind: 'series', id: seriesId };
+  } else {
+    target = { kind: playingItem.kind, id: playingItem.id };
+  }
+  const key = `${target.kind}:${target.id}`;
+  try {
+    const list = await api<{ items: Item[] }>(`/profiles/${profile.id}/my-list?language=${encodeURIComponent(appLanguage)}`);
+    list.items.forEach((item) => favorites.add(`${item.kind}:${item.id}`));
+    const saved = !list.items.some((item) => item.kind === target.kind && item.id === target.id);
+    await api(`/profiles/${profile.id}/my-list`, { kind: target.kind, id: target.id, saved });
+    if (saved) favorites.add(key); else favorites.delete(key);
+    invalidateHomeCache();
+    if (view === 'my-list') myCinemaNeedsRefresh = true;
+    syncBrowserPlayerDetails();
+  } catch (error) {
+    playerStatus.textContent = errorMessage(error);
+    revealPlayerControls();
+  }
+}
 function closePlayer(save = true): void {
   if (player.classList.contains('hidden')) return;
   activeDirectOriginalPlayback = false;
+  hidePlaybackError();
   directOriginalPlaybackHasStarted = false;
   window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
   window.clearTimeout(pendingWebOsSeekTimer); pendingWebOsSeekTimer = 0; pendingWebOsSeekSeconds = null;
@@ -2092,20 +2372,45 @@ function closePlayer(save = true): void {
   if (!liveItemToPreview) { video.pause(); video.removeAttribute('src'); video.load(); }
   player.classList.add('hidden'); clearExternalSubtitle();
   playingItem = null;
+  syncBrowserPlayerDetails();
   if (liveItemToPreview) {
     const preview = content.querySelector<HTMLElement>('.central-live-preview');
     if (preview) { video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing'); preview.appendChild(video); livePreviewLoader?.(liveItemToPreview); }
   }
-  lastFocus?.focus();
+  const returnFocus = playerReturnFocus;
+  playerReturnFocus = null;
+  if (myCinemaNeedsRefresh && view === 'my-list') {
+    myCinemaNeedsRefresh = false;
+    void showMyList();
+  } else if (returnFocus?.isConnected) focusWithoutMovingScroll(returnFocus);
 }
 function showProfiles(): void {
   const panel = node('section', 'central-profile-picker');
   panel.appendChild(node('h1', undefined, 'Choose a profile'));
   const choices = node('div', 'central-profile-choices');
   for (const choice of profiles) {
-    const button = node('button', 'central-profile-choice', choice.name) as HTMLButtonElement;
-    button.onclick = () => { profile = choice; watched.clear(); favorites.clear(); invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', choice.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); };
-    choices.appendChild(button);
+    const option = node('div', 'central-profile-option');
+    const button = node('button', 'central-profile-choice') as HTMLButtonElement;
+    button.appendChild(node('span', undefined, choice.name));
+    if (choice.isMain) button.appendChild(node('small', 'central-profile-main-label', 'MAIN PROFILE'));
+    button.onclick = () => { void (async () => {
+      try {
+        await api('/profiles/selection', { profileId: choice.id }, 'PUT');
+        profile = choice; watched.clear(); favorites.clear(); invalidateCatalogCache();
+        await loadProfileSettings(choice);
+        localStorage.setItem('streamcinema.profile', choice.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
+      } catch (error) { setStatus(errorMessage(error)); }
+    })(); };
+    const mainButton = node('button', `central-profile-main${choice.isMain ? ' is-main' : ''}`, choice.isMain ? 'Main profile' : 'Set as main') as HTMLButtonElement;
+    mainButton.type = 'button'; mainButton.disabled = !!choice.isMain;
+    mainButton.onclick = () => { void (async () => {
+      try {
+        await api(`/profiles/${choice.id}/main`, {}, 'PUT');
+        profiles = profiles.map((entry) => ({ ...entry, isMain: entry.id === choice.id }));
+        navigate('profiles');
+      } catch (error) { setStatus(errorMessage(error)); }
+    })(); };
+    option.append(button, mainButton); choices.appendChild(option);
   }
   panel.appendChild(choices);
   const create = node('form', 'central-profile-create') as HTMLFormElement;
@@ -2114,7 +2419,7 @@ function showProfiles(): void {
   create.append(input, add); panel.appendChild(create);
   create.onsubmit = (event) => { event.preventDefault();
     void (async () => {
-      try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); profile = next; invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', next.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); }
+      try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); await api('/profiles/selection', { profileId: next.id }, 'PUT'); profile = next; invalidateCatalogCache(); await loadProfileSettings(next); localStorage.setItem('streamcinema.profile', next.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); }
       catch (error) { setStatus(errorMessage(error)); }
     })();
   };
@@ -2185,7 +2490,7 @@ async function showSettings(): Promise<void> {
       else if (selectedSubtitleLanguages.size > 1) selectedSubtitleLanguages.delete(code);
       else { checkbox.checked = true; return; }
       subtitleSearchLanguages = availableLanguages.filter((language) => selectedSubtitleLanguages.has(language.code)).map((language) => language.code);
-      localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
+      void saveProfileSettings();
       renderSubtitlePreferenceMessage();
     };
     option.append(checkbox, document.createTextNode(name)); subtitleLanguageOptions.appendChild(option);
@@ -2193,7 +2498,7 @@ async function showSettings(): Promise<void> {
   renderSubtitlePreferenceMessage(); subtitleLanguagePicker.appendChild(subtitleLanguageOptions);
   const hearingPreference = node('label', 'provider-hearing-preference') as HTMLLabelElement;
   const hearingCheckbox = node('input') as HTMLInputElement; hearingCheckbox.type = 'checkbox'; hearingCheckbox.checked = preferHearingImpairedSubtitles;
-  hearingCheckbox.onchange = () => { preferHearingImpairedSubtitles = hearingCheckbox.checked; localStorage.setItem('streamcinema.subtitle-hearing-impaired', String(preferHearingImpairedSubtitles)); };
+  hearingCheckbox.onchange = () => { preferHearingImpairedSubtitles = hearingCheckbox.checked; void saveProfileSettings(); };
   hearingPreference.append(hearingCheckbox, document.createTextNode('Prefer SDH / hearing-impaired subtitles in search results'));
   panel.append(subtitleLanguagePicker, hearingPreference, subtitlePreferenceMessage);
   openSubtitlesStatus = node('p', undefined, 'Checking OpenSubtitles configuration…');
@@ -2314,9 +2619,9 @@ async function showSettings(): Promise<void> {
     void api('/provider/sync', {}).then(() => updateDatabaseSummary())
       .catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); databaseRefresh.disabled = false; });
   };
-  type CategorySettingsUi = { page: HTMLElement; section: 'live' | 'movies' | 'series'; filter: HTMLSelectElement; actions: HTMLButtonElement[]; grid: HTMLElement; status: HTMLElement; categories: BrowseCategory[]; hidden: Set<string>; storageKey: string };
+  type CategorySettingsUi = { page: HTMLElement; section: 'live' | 'movies' | 'series'; filter: HTMLSelectElement; actions: HTMLButtonElement[]; grid: HTMLElement; status: HTMLElement; categories: BrowseCategory[]; hidden: Set<string> };
   const categorySettingsUis: CategorySettingsUi[] = [];
-  const buildCategorySettings = (pageElement: HTMLElement, section: 'live' | 'movies' | 'series', hidden: Set<string>, storageKey: string): CategorySettingsUi => {
+  const buildCategorySettings = (pageElement: HTMLElement, section: 'live' | 'movies' | 'series', hidden: Set<string>): CategorySettingsUi => {
     const label = section === 'live' ? 'Live TV' : section === 'movies' ? 'movie' : 'show';
     const description = node('p', 'central-settings-description', `Choose which provider categories appear in ${label}. Hidden categories are omitted from the ${section === 'live' ? 'channel' : label} category shelves.`);
     const filterLabel = node('label', 'central-settings-category-language');
@@ -2332,10 +2637,10 @@ async function showSettings(): Promise<void> {
     const grid = node('div', 'central-settings-live-category-grid central-settings-category-grid');
     const statusText = node('p', 'provider-message', `Loading ${label} categories…`);
     pageElement.append(description, filterLabel, actionsWrap, statusText, grid);
-    const ui: CategorySettingsUi = { page: pageElement, section, filter, actions: [showAll, hideAll], grid, status: statusText, categories: [], hidden, storageKey };
+    const ui: CategorySettingsUi = { page: pageElement, section, filter, actions: [showAll, hideAll], grid, status: statusText, categories: [], hidden };
     categorySettingsUis.push(ui);
     const persist = (): void => {
-      localStorage.setItem(storageKey, JSON.stringify([...hidden]));
+      void saveProfileSettings();
       if (selectedCategoryBySection[section] && hidden.has(selectedCategoryBySection[section])) selectedCategoryBySection[section] = '';
       if (section === 'movies' || section === 'series') cachedViews.delete(section);
     };
@@ -2364,9 +2669,9 @@ async function showSettings(): Promise<void> {
     }).catch((error) => { statusText.textContent = errorMessage(error); });
     return ui;
   };
-  buildCategorySettings(liveCategoriesPage, 'live', hiddenLiveCategoryIds, 'streamcinema.hidden-live-categories');
-  buildCategorySettings(movieCategoriesPage, 'movies', hiddenMovieCategoryIds, 'streamcinema.hidden-movie-categories');
-  buildCategorySettings(seriesCategoriesPage, 'series', hiddenSeriesCategoryIds, 'streamcinema.hidden-series-categories');
+  buildCategorySettings(liveCategoriesPage, 'live', hiddenLiveCategoryIds);
+  buildCategorySettings(movieCategoriesPage, 'movies', hiddenMovieCategoryIds);
+  buildCategorySettings(seriesCategoriesPage, 'series', hiddenSeriesCategoryIds);
   selectSettingsPage(activeSettingsPage);
   layout.append(sidebar, pageHost); panel.appendChild(layout); content.appendChild(panel);
   layout.addEventListener('keydown', (event) => {
@@ -2476,13 +2781,13 @@ async function connect(next: Config): Promise<void> {
   const languageData = await api<{ items: AppLanguage[] }>('/languages');
   availableLanguages = languageData.items.filter((language) => language.code !== 'und' && language.name.toLowerCase() !== 'unlabelled');
   localStorage.removeItem('streamcinema.language');
-  subtitleSearchLanguages = subtitleSearchLanguages.filter((code) => availableLanguages.some((language) => language.code === code));
-  if (!subtitleSearchLanguages.length) subtitleSearchLanguages = [availableLanguages.some(({ code }) => code === 'en') ? 'en' : availableLanguages[0]?.code || 'en'];
-  localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
-  const result = await api<{ items: Profile[] }>('/profiles');
+  const result = await api<{ items: Profile[]; selectedProfileId?: string | null; mainProfileId?: string | null }>('/profiles');
   profiles = result.items;
   if (!profiles.length) { const first = await api<Profile>('/profiles', { name: 'Default' }); profiles = [first]; }
-  profile = profiles.find((entry) => entry.id === localStorage.getItem('streamcinema.profile')) ?? profiles[0];
+  const preferredProfileId = result.selectedProfileId ?? localStorage.getItem('streamcinema.profile') ?? result.mainProfileId;
+  profile = profiles.find((entry) => entry.id === preferredProfileId) ?? profiles.find((entry) => entry.isMain) ?? profiles[0];
+  if (result.selectedProfileId !== profile.id) await api('/profiles/selection', { profileId: profile.id }, 'PUT');
+  await loadProfileSettings(profile);
   localStorage.setItem('streamcinema.profile', profile.id);
   renderProfileButton();
   localStorage.setItem('streamcinema.config', JSON.stringify(next));
@@ -2520,6 +2825,30 @@ el<HTMLButtonElement>('central-player-back').onclick = () => closePlayer();
 el<HTMLButtonElement>('central-play-pause').onclick = () => { if (video.paused) void video.play(); else video.pause(); };
 el<HTMLButtonElement>('central-rewind').onclick = () => { seekBy(-10); revealPlayerControls(); };
 el<HTMLButtonElement>('central-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
+function browserPlayerActionButton(action: 'audio' | 'subtitle'): HTMLButtonElement {
+  return el<HTMLButtonElement>(action === 'audio' ? 'central-browser-player-audio' : 'central-browser-player-subtitle');
+}
+let playerMenuReturnFocus: HTMLElement | null = null;
+function restorePlayerMenuFocus(): void {
+  const target = playerMenuReturnFocus?.isConnected ? playerMenuReturnFocus : browserPlayerActionButton('audio');
+  playerMenuReturnFocus = null;
+  target.focus();
+  revealPlayerControls();
+}
+el<HTMLButtonElement>('central-browser-player-back').onclick = () => closePlayer();
+el<HTMLButtonElement>('central-browser-player-play').onclick = () => { if (video.paused) void video.play(); else video.pause(); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-rewind').onclick = () => { seekBy(-10); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-restart').onclick = () => { seekTo(0); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-fullscreen').onclick = () => centralFullscreenButton.click();
+el<HTMLButtonElement>('central-browser-player-favorite').onclick = () => { void togglePlayingItemFavorite(); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-audio').onclick = () => {
+  playerMenuReturnFocus = el<HTMLButtonElement>('central-browser-player-audio'); showStreamLanguageMenu();
+};
+el<HTMLButtonElement>('central-browser-player-subtitle').onclick = () => {
+  playerMenuReturnFocus = el<HTMLButtonElement>('central-browser-player-subtitle'); showSubtitleMenu();
+};
+player.addEventListener('pointermove', revealPlayerControls, { passive: true });
 function seekTo(seconds: number): void {
   if (!Number.isFinite(video.duration) || video.duration <= 0) return;
   const target = Math.max(0, Math.min(video.duration, seconds));
@@ -2527,15 +2856,17 @@ function seekTo(seconds: number): void {
   const mediaId = webOsMediaId();
   if (service && mediaId) {
     pendingWebOsSeekSeconds = target;
+    updatePlaybackProgress();
     window.clearTimeout(pendingWebOsSeekTimer);
     pendingWebOsSeekTimer = window.setTimeout(() => {
       const seekTarget = pendingWebOsSeekSeconds;
-      pendingWebOsSeekSeconds = null;
+      pendingWebOsSeekTimer = 0;
       if (seekTarget === null) return;
       const wasPlaying = !video.paused;
       if (wasPlaying) video.pause();
       const finishSeek = (success: boolean): void => {
-        if (!success) {
+        if (pendingWebOsSeekSeconds === seekTarget) pendingWebOsSeekSeconds = null;
+        if (!success && pendingWebOsSeekSeconds === null) {
           try { video.currentTime = seekTarget; } catch { /* The TV media service remains the preferred seek path. */ }
         }
         window.setTimeout(() => {
@@ -2556,16 +2887,26 @@ function seekTo(seconds: number): void {
 }
 function seekBy(seconds: number): void { seekTo((pendingWebOsSeekSeconds ?? video.currentTime) + seconds); }
 const seekTrack = el<HTMLInputElement>('central-player-track');
+const browserSeekTrack = el<HTMLInputElement>('central-browser-player-track');
+let browserSeekSelected = false;
+function setBrowserSeekSelected(selected: boolean): void {
+  browserSeekSelected = selected;
+  browserSeekTrack.closest('.central-browser-player-timeline')?.classList.toggle('seek-selected', selected);
+}
+browserSeekTrack.addEventListener('blur', () => setBrowserSeekSelected(false));
 function updatePlayerOptionVisibility(): void {
   const live = playingItem?.kind === 'live';
   player.classList.toggle('live-playback', live);
   el('central-audio').classList.toggle('hidden', live);
   el('central-subtitle').classList.toggle('hidden', live);
+  el('central-browser-player-audio').classList.toggle('hidden', live);
+  el('central-browser-player-subtitle').classList.toggle('hidden', live);
   if (centralFullscreenButton.isConnected) centralFullscreenButton.classList.remove('hidden');
+  syncBrowserPlayerDetails();
 }
-seekTrack.addEventListener('input', () => {
+for (const track of [seekTrack, browserSeekTrack]) track.addEventListener('input', () => {
   if (!Number.isFinite(video.duration) || video.duration <= 0) return;
-  seekTo((Number(seekTrack.value) / Number(seekTrack.max)) * video.duration);
+  seekTo((Number(track.value) / Number(track.max)) * video.duration);
   revealPlayerControls();
 });
 el<HTMLButtonElement>('central-next-episode-play').onclick = playFollowingEpisodeNow;
@@ -2573,7 +2914,7 @@ el<HTMLButtonElement>('central-next-episode-cancel').onclick = () => {
   episodeAutoplayDismissed = true;
   hideNextEpisodePrompt();
   revealPlayerControls();
-  el<HTMLButtonElement>('central-play-pause').focus();
+  focusPlayerPlaybackControl();
 };
 function showStreamLanguageMenu(): void {
   if (!playingItem) return;
@@ -2586,7 +2927,7 @@ function showStreamLanguageMenu(): void {
     (candidate.providerId || candidate.id) === (stream.providerId || stream.id)) === index);
   const languageCounts = new Map<string, number>();
   for (const stream of available) {
-    const language = stream.language?.trim() || stream.languageCode?.toUpperCase() || 'Unlabelled';
+    const language = playerLanguageCode(stream.languageCode || stream.language);
     languageCounts.set(language, (languageCounts.get(language) ?? 0) + 1);
   }
   const languageIndices = new Map<string, number>();
@@ -2595,13 +2936,14 @@ function showStreamLanguageMenu(): void {
     for (const stream of available) {
       const id = stream.providerId || stream.id;
       const currentId = playingItem.streamId || playingItem.id;
-      const language = stream.language?.trim() || stream.languageCode?.toUpperCase() || 'Unlabelled';
+      const language = playerLanguageCode(stream.languageCode || stream.language);
       const languageIndex = (languageIndices.get(language) ?? 0) + 1; languageIndices.set(language, languageIndex);
       const version = (languageCounts.get(language) ?? 0) > 1 ? ` · Version ${languageIndex}` : '';
       const button = node('button', 'central-player-stream-option', `${language}${version}${stream.extension ? ` · ${stream.extension.toUpperCase()}` : ''}${id === currentId ? ' · Playing' : ''}`) as HTMLButtonElement;
+      button.title = stream.language?.trim() || stream.languageCode?.toUpperCase() || 'Unlabelled language';
       button.setAttribute('aria-current', id === currentId ? 'true' : 'false');
       button.onclick = () => {
-        if (!playingItem || id === (playingItem.streamId || playingItem.id)) { el('central-player-stream-menu').classList.add('hidden'); return; }
+        if (!playingItem || id === (playingItem.streamId || playingItem.id)) { el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus(); return; }
         const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
         const nextItem = { ...playingItem, id, streamId: id };
         el('central-player-stream-menu').classList.add('hidden');
@@ -2622,7 +2964,7 @@ function showStreamLanguageMenu(): void {
       button.onclick = () => {
         for (let trackIndex = 0; trackIndex < audioTracks.length; trackIndex++) audioTracks[trackIndex].enabled = trackIndex === index;
         playerStatus.textContent = `Audio track: ${trackName}`;
-        el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus(); revealPlayerControls();
+        el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus();
       };
       options.appendChild(button); optionCount++;
     }
@@ -2632,8 +2974,8 @@ function showStreamLanguageMenu(): void {
   menu.classList.remove('hidden'); revealPlayerControls();
   menu.querySelector<HTMLButtonElement>('.central-player-stream-option')?.focus() ?? el<HTMLButtonElement>('central-player-stream-close').focus();
 }
-el<HTMLButtonElement>('central-audio').onclick = showStreamLanguageMenu;
-el<HTMLButtonElement>('central-player-stream-close').onclick = () => { el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus(); revealPlayerControls(); };
+el<HTMLButtonElement>('central-audio').onclick = () => { playerMenuReturnFocus = el<HTMLButtonElement>('central-audio'); showStreamLanguageMenu(); };
+el<HTMLButtonElement>('central-player-stream-close').onclick = () => { el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus(); };
 centralFullscreenButton.onclick = () => {
   const playerWithWebkit = player as HTMLElement & { webkitRequestFullscreen?: () => void };
   const videoWithWebkit = video as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
@@ -2659,7 +3001,7 @@ function selectSubtitleTrack(selected: TextTrack | null, label: string): void {
   for (let index = 0; index < tracks.length; index++) tracks[index].mode = tracks[index] === selected ? 'showing' : 'disabled';
   subtitlesIndex = selected ? Array.from({ length: tracks.length }, (_, index) => tracks[index]).indexOf(selected) : tracks.length;
   playerStatus.textContent = selected ? `Subtitles: ${label}` : 'Subtitles off';
-  el('central-player-stream-menu').classList.add('hidden'); revealPlayerControls();
+  el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus();
 }
 function attachExternalSubtitle(vtt: string, label: string, language: string): void {
   clearExternalSubtitle();
@@ -2674,7 +3016,7 @@ function attachExternalSubtitle(vtt: string, label: string, language: string): v
   video.appendChild(track); externalSubtitleTrack = track;
   window.setTimeout(() => { try { track.track.mode = 'showing'; } catch { /* Track may not have loaded yet. */ } }, 100);
   subtitlesIndex = 0; playerStatus.textContent = `Subtitles: ${label}`;
-  el('central-player-stream-menu').classList.add('hidden'); revealPlayerControls();
+  el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus();
 }
 function showSubtitleMenu(): void {
   if (!playingItem) return;
@@ -2745,7 +3087,7 @@ function showSubtitleMenu(): void {
   };
   menu.classList.remove('hidden'); revealPlayerControls(); off.focus();
 }
-el<HTMLButtonElement>('central-subtitle').onclick = showSubtitleMenu;
+el<HTMLButtonElement>('central-subtitle').onclick = () => { playerMenuReturnFocus = el<HTMLButtonElement>('central-subtitle'); showSubtitleMenu(); };
 video.ontimeupdate = () => {
   updatePlaybackProgress();
   updateNextEpisodePrompt();
@@ -2753,16 +3095,19 @@ video.ontimeupdate = () => {
 };
 video.textTracks.addEventListener('addtrack', updatePlayerOptionVisibility);
 video.onended = () => {
-  if (playingItem?.kind === 'episode') { void advanceToFollowingEpisode(); return; }
+  if (playingItem?.kind === 'episode') {
+    if (activeRemuxMode !== null) { playerStatus.textContent = 'Remux stream ended.'; revealPlayerControls(); return; }
+    void advanceToFollowingEpisode(); return;
+  }
   void saveProgress(true); closePlayer(false);
 };
 video.onerror = () => {
   window.clearTimeout(directPlaybackWatchdog); directPlaybackWatchdog = 0;
   if (playingItem?.kind === 'live' && activeLiveFormat === 'm3u8') { const item = playingItem; playingItem = null; void play(item, 'ts'); return; }
-  if (playingItem && activeDirectOriginalPlayback) {
+  if (playingItem && activeDirectOriginalPlayback && (playingItem.kind === 'movie' || playingItem.kind === 'episode')) {
     const item = playingItem;
     const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
-    void fallbackOriginalPlaybackToRemux(item, activeLiveFormat, resumeAt);
+    askToUseRemux(item, activeLiveFormat, resumeAt);
     return;
   }
   if (playingItem && activeRemuxMode === 'copy' && !remuxTranscodeAttempted && (video.error?.code === MediaError.MEDIA_ERR_DECODE || video.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
@@ -2770,7 +3115,7 @@ video.onerror = () => {
     remuxTranscodeAttempted = true; playerStatus.textContent = 'Trying compatibility conversion…';
     void play(item, activeLiveFormat, resumeAt, undefined, true); return;
   }
-  if (playingItem) { playerStatus.textContent = 'This stream could not play. Check the stream format or TV codec support.'; revealPlayerControls(); }
+  if (playingItem) showPlaybackError('This stream could not play. Check the stream format or TV codec support.');
 };
 video.onwaiting = () => { playerStatus.textContent = 'Buffering…'; revealPlayerControls(); };
 video.onplaying = () => {
@@ -2783,11 +3128,31 @@ video.onclick = () => {
   else if (video.paused) void video.play(); else video.pause();
 };
 function setPlayPauseIcon(isPaused: boolean): void {
-  const button = el<HTMLButtonElement>('central-play-pause');
-  button.setAttribute('aria-label', isPaused ? 'Play' : 'Pause');
-  button.innerHTML = isPaused
-    ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m11 6 15 10-15 10z"/></svg>'
-    : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 7v18M21 7v18"/></svg>';
+  const browserButton = el<HTMLButtonElement>('central-browser-player-play');
+  browserButton.setAttribute('aria-label', isPaused ? 'Play' : 'Pause');
+  browserButton.title = isPaused ? 'Play' : 'Pause';
+  browserButton.innerHTML = isPaused
+    ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m10 6 17 10-17 10z"/></svg>'
+    : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 5h6v22H7zM19 5h6v22h-6z"/></svg>';
+  for (const id of ['central-play-pause']) {
+    const button = el<HTMLButtonElement>(id);
+    button.setAttribute('aria-label', isPaused ? 'Play' : 'Pause');
+    button.title = isPaused ? 'Play' : 'Pause';
+    button.innerHTML = isPaused
+      ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m11 6 15 10-15 10z"/></svg>'
+      : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 7v18M21 7v18"/></svg>';
+  }
+  const indicator = el('central-browser-player-state');
+  window.clearTimeout(browserPlaybackIndicatorTimer);
+  indicator.innerHTML = isPaused
+    ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m10 6 17 10-17 10z"/></svg>'
+    : '';
+  indicator.classList.toggle('visible', isPaused);
+  if (isPaused) browserPlaybackIndicatorTimer = window.setTimeout(() => indicator.classList.remove('visible'), 700);
+  syncBrowserPlayerDetails();
+}
+function focusPlayerPlaybackControl(): void {
+  el<HTMLButtonElement>('central-browser-player-play').focus();
 }
 let webosHomeBackPresses = 0;
 let webosHomeBackResetTimer = 0;
@@ -2848,10 +3213,46 @@ video.onpause = () => { setPlayPauseIcon(true); revealPlayerControls(); };
 video.onplay = () => { setPlayPauseIcon(false); revealPlayerControls(); };
 player.addEventListener('pointermove', () => { if (!player.classList.contains('hidden')) revealPlayerControls(); });
 
+function channelSurfDirection(event: KeyboardEvent): number {
+  if ([427].includes(event.keyCode) || ['ChannelUp', 'TVChannelUp', 'Channel+', '+', 'Add'].includes(event.key)) return 1;
+  if ([428].includes(event.keyCode) || ['ChannelDown', 'TVChannelDown', 'Channel-', '-', 'Subtract'].includes(event.key)) return -1;
+  return 0;
+}
+async function surfLiveChannel(direction: number): Promise<void> {
+  if (view !== 'live') return;
+  const inPlayer = !player.classList.contains('hidden') && playingItem?.kind === 'live';
+  const focusedCard = document.activeElement instanceof HTMLElement
+    ? document.activeElement.closest<HTMLButtonElement>('.central-live-grid .central-card[data-card-key]') : null;
+  const currentId = inPlayer ? (playingItem?.streamId ?? playingItem?.id ?? '')
+    : focusedCard?.dataset.cardKey?.slice('live:'.length) || selectedLiveChannelId;
+  let items = liveChannelItems;
+  let index = items.findIndex((item) => (item.streamId ?? item.id) === currentId || item.id === currentId);
+  if (index < 0) index = direction > 0 ? -1 : 0;
+  if (direction > 0 && index === items.length - 1 && liveChannelPageLoader) {
+    const before = items.length;
+    await liveChannelPageLoader();
+    items = liveChannelItems;
+    if (items.length > before) index = items.findIndex((item) => (item.streamId ?? item.id) === currentId || item.id === currentId);
+    if (index < 0) index = -1;
+  }
+  if (!items.length) return;
+  const nextIndex = (index + direction + items.length) % items.length;
+  const next = items[nextIndex];
+  selectedLiveChannelId = next.streamId ?? next.id;
+  if (inPlayer) { await play(next, activeLiveFormat); return; }
+  const cardButton = Array.from(content.querySelectorAll<HTMLButtonElement>('.central-live-grid .central-card[data-card-key]'))
+    .find((button) => button.dataset.cardKey === `live:${next.id}`);
+  if (cardButton) { cardButton.focus(); cardButton.click(); }
+}
+
 document.addEventListener('keydown', (event) => {
   let active = document.activeElement as HTMLElement | null;
   const key = event.keyCode;
   const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
+  const channelDirection = channelSurfDirection(event);
+  if (channelDirection && view === 'live' && ((!player.classList.contains('hidden') && playingItem?.kind === 'live') || player.classList.contains('hidden'))) {
+    event.preventDefault(); event.stopImmediatePropagation(); void surfLiveChannel(channelDirection); return;
+  }
   if (webosExitPrompt) {
     event.preventDefault(); event.stopImmediatePropagation();
     const stay = webosExitPrompt.querySelector<HTMLButtonElement>('.webos-exit-stay');
@@ -2863,17 +3264,43 @@ document.addEventListener('keydown', (event) => {
     else if (key === 13 || key === 23 || key === 32) (document.activeElement === exit ? exit : stay).click();
     return;
   }
+  if (!el('central-remux-prompt').classList.contains('hidden')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    const confirm = el<HTMLButtonElement>('central-remux-confirm');
+    const cancel = el<HTMLButtonElement>('central-remux-cancel');
+    if (isBack) { cancel.click(); return; }
+    if (key === 37 || key === 39 || key === 38 || key === 40) (document.activeElement === confirm ? cancel : confirm).focus();
+    else if (key === 13 || key === 23 || key === 32) (document.activeElement === cancel ? cancel : confirm).click();
+    return;
+  }
+  if (!el('central-playback-error').classList.contains('hidden')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (isBack || key === 13 || key === 23 || key === 32) el<HTMLButtonElement>('central-playback-error-close').click();
+    return;
+  }
   if (activeCategoryJumpMenu?.panel.classList.contains('open') && isBack) {
     event.preventDefault(); event.stopPropagation(); activeCategoryJumpMenu.close(); return;
   }
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && key === 8) return;
-  const seekInputActive = active?.id === 'central-player-track';
+  const seekInputActive = active?.id === 'central-player-track' || active?.id === 'central-browser-player-track';
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack && !seekInputActive) return;
+  if (!player.classList.contains('hidden') && active?.id === 'central-browser-player-track' && !isBack) {
+    if (key === 13 || key === 23 || key === 32) {
+      event.preventDefault(); event.stopPropagation(); setBrowserSeekSelected(!browserSeekSelected); revealPlayerControls(); return;
+    }
+    if (key === 37 || key === 39) {
+      event.preventDefault(); event.stopPropagation();
+      if (browserSeekSelected) seekBy(key === 37 ? -10 : 10);
+      else el<HTMLButtonElement>(key === 37 ? 'central-browser-player-rewind' : 'central-browser-player-forward').focus();
+      revealPlayerControls(); return;
+    }
+  }
   if (isBack) {
     event.preventDefault();
+    if (active?.id === 'central-browser-player-track') setBrowserSeekSelected(false);
     if (webosExitPrompt) { closeWebosExitPrompt(); return; }
     if (!player.classList.contains('hidden') && !el('central-player-stream-menu').classList.contains('hidden')) {
-      el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus();
+      el('central-player-stream-menu').classList.add('hidden'); restorePlayerMenuFocus();
     }
     else if (!player.classList.contains('hidden')) closePlayer();
     else if (view === 'detail') backFromDetail();
@@ -2933,7 +3360,7 @@ document.addEventListener('keydown', (event) => {
     const controlsWereHidden = player.classList.contains('controls-hidden');
     revealPlayerControls();
     if (controlsWereHidden && [37, 38, 39, 40].includes(key)) {
-      el<HTMLButtonElement>('central-play-pause').focus();
+      focusPlayerPlaybackControl();
       active = document.activeElement as HTMLElement | null;
     }
     if (key === 415 || key === 19) { event.preventDefault(); if (video.paused) void video.play(); else video.pause(); }
@@ -2941,14 +3368,40 @@ document.addEventListener('keydown', (event) => {
     if (key === 417 || ['MediaFastForward', 'FastForward'].includes(event.key) || event.code === 'MediaFastForward') { event.preventDefault(); seekBy(10); return; }
     if ([37, 38, 39, 40].includes(key)) {
       const menuOpen = !el('central-player-stream-menu').classList.contains('hidden');
-      if (!menuOpen && active?.id === 'central-player-track' && (key === 37 || key === 39)) {
+      if (!menuOpen && key === 39 && active?.id === 'central-browser-player-play') {
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-browser-player-rewind').focus(); return;
+      }
+      if (!menuOpen && key === 39 && active?.id === 'central-browser-player-rewind') {
+        event.preventDefault(); event.stopPropagation(); browserSeekTrack.focus(); return;
+      }
+      if (!menuOpen && key === 37 && active?.id === 'central-browser-player-forward') {
+        event.preventDefault(); event.stopPropagation(); browserSeekTrack.focus(); return;
+      }
+      if (!menuOpen && active?.closest('.central-browser-player-rail') && (key === 38 || key === 40)) {
+        const railButtons = Array.from(player.querySelectorAll<HTMLButtonElement>('.central-browser-player-rail button'))
+          .filter((button) => button.getClientRects().length > 0 && !button.disabled);
+        const railIndex = active instanceof HTMLButtonElement ? railButtons.indexOf(active) : -1;
+        const next = railButtons[railIndex + (key === 38 ? -1 : 1)];
+        event.preventDefault(); event.stopPropagation();
+        if (next) next.focus();
+        else if (key === 40) el<HTMLButtonElement>('central-browser-player-play').focus();
+        return;
+      }
+      if (!menuOpen && key === 38 && (active?.id === 'central-browser-player-play'
+        || active?.closest('.central-browser-player-timeline'))) {
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-browser-player-back').focus(); return;
+      }
+      if (!menuOpen && (active?.id === 'central-player-track' || active?.id === 'central-browser-player-track') && (key === 37 || key === 39)) {
+        if (active?.id === 'central-browser-player-track') return;
         event.preventDefault(); event.stopPropagation(); seekBy(key === 37 ? -10 : 10); return;
       }
-      if (!menuOpen && active?.id === 'central-player-track' && key === 38) {
-        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-player-back').focus(); return;
+      if (!menuOpen && (active?.id === 'central-player-track' || active?.id === 'central-browser-player-track') && key === 38) {
+        if (active?.id === 'central-browser-player-track') setBrowserSeekSelected(false);
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-browser-player-back').focus(); return;
       }
-      if (!menuOpen && active?.id === 'central-player-track' && key === 40) {
-        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-play-pause').focus(); return;
+      if (!menuOpen && (active?.id === 'central-player-track' || active?.id === 'central-browser-player-track') && key === 40) {
+        if (active?.id === 'central-browser-player-track') setBrowserSeekSelected(false);
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-browser-player-play').focus(); return;
       }
       if (!menuOpen && active?.id === 'central-player-back' && key === 40) {
         event.preventDefault(); event.stopPropagation(); seekTrack.focus(); return;

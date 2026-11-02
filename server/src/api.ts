@@ -1,12 +1,13 @@
 import Fastify from 'fastify';
 import type { FastifyRequest } from 'fastify';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { getCatalog, getNormalizedDetail, getNormalizedSeriesTitle, hasNormalizedCatalog, listCatalog, normalizedTitleSql,
   listAvailableLanguages, listNormalizedCategories, listNormalizedEpisodeStreams, listNormalizedEpisodes, listNormalizedHomeCatalog, listNormalizedSeasons,
   createClientSession, createWebAccount, hasWebAccount, loadProvider, loadWebAccount, pool, revokeClientSession, saveOpenSubtitlesApiKey, saveProvider, saveProviderTitleDescription, validateClientSession } from './database.js';
 import { playbackUrl, providerPlaybackInfo, requestProvider } from './provider.js';
-import { createSessionToken, encrypt, hashPassword, tokenMatches, verifyPassword } from './security.js';
+import { createSessionToken, decrypt, encrypt, hashPassword, tokenMatches, verifyPassword } from './security.js';
 import { curatedHome, hasTmdbToken, setTmdbToken, type HomeMedia } from './tmdb.js';
 import { ensureTmdbSeasonMetadata, ensureTmdbTitleMetadata, tmdbArtworkBackfillStatus } from './tmdb-on-demand.js';
 import { configureOpenSubtitles, downloadOpenSubtitle, openSubtitlesConfigured, searchOpenSubtitles } from './opensubtitles.js';
@@ -17,7 +18,14 @@ const pageQuery = z.object({ page: z.coerce.number().int().min(1).default(1), li
 const idParam = z.object({ id: z.string().regex(/^\d+$/) });
 const profileParam = z.object({ id: z.string().uuid() });
 const profileName = z.object({ name: z.string().trim().min(1).max(24) });
-const listInput = z.object({ kind: z.enum(['movie', 'series']), id: z.string().regex(/^\d+$/), saved: z.boolean() });
+const profileSettings = z.object({
+  subtitleSearchLanguages: z.array(z.string().regex(/^[a-z]{2}$/)).max(64),
+  preferHearingImpairedSubtitles: z.boolean(),
+  hiddenCategories: z.object({ live: z.array(z.string().max(200)).max(2000), movies: z.array(z.string().max(200)).max(2000),
+    series: z.array(z.string().max(200)).max(2000) }).strict()
+}).strict();
+const profileSettingsInput = z.object({ settings: profileSettings }).strict();
+const listInput = z.object({ kind: z.enum(['movie', 'series', 'live']), id: z.string().regex(/^\d+$/), saved: z.boolean() });
 const progressInput = z.object({ kind: z.enum(['movie', 'episode', 'live']), id: z.string().regex(/^\d+$/), positionSeconds: z.number().int().min(0), durationSeconds: z.number().int().min(0).optional(), completed: z.boolean().default(false) });
 const playbackInput = z.object({ kind: z.enum(['live', 'movie', 'episode']), id: z.string().regex(/^\d+$/), format: z.enum(['m3u8', 'ts']).optional() });
 const providerInput = z.object({ baseUrl: z.string().trim().url().max(512), username: z.string().trim().min(1).max(128), password: z.string().min(1).max(256) });
@@ -74,8 +82,8 @@ function recordLoginFailure(ip: string): void {
   loginFailures.set(ip, state);
   if (loginFailures.size > 1000) for (const [key, value] of loginFailures) if (value.resetsAt <= now) loginFailures.delete(key);
 }
-async function profileBelongsToDevice(profileId: string, device: string): Promise<boolean> {
-  const { rowCount } = await pool.query('SELECT 1 FROM profiles WHERE id=$1 AND device_id=$2', [profileId, device]);
+async function profileBelongsToAccount(profileId: string): Promise<boolean> {
+  const { rowCount } = await pool.query("SELECT 1 FROM profiles WHERE id=$1 AND account_id='primary'", [profileId]);
   return (rowCount ?? 0) > 0;
 }
 
@@ -91,12 +99,12 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
   app.addHook('onRequest', async (request, reply) => {
     reply.header('Access-Control-Allow-Origin', '*');
     reply.header('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-Device-Id');
-    reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
     reply.header('Cache-Control', 'no-store');
     if (request.method === 'OPTIONS') return reply.code(204).send();
     if (!request.url.startsWith('/api/v1/')) return;
     const path = request.url.split('?')[0];
-    if (path === '/api/v1/health' || path === '/api/v1/auth/status' || path === '/api/v1/auth/login' || path.startsWith('/api/v1/playback/remux/')) return;
+    if (path === '/api/v1/health' || path === '/api/v1/auth/status' || path === '/api/v1/auth/login' || path.startsWith('/api/v1/playback/remux/') || path.startsWith('/api/v1/playback/proxy/live/')) return;
     const device = deviceId(request);
     if (tokenMatches(request.headers.authorization, options.apiToken)) return;
     const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
@@ -242,7 +250,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
   app.get('/api/v1/home', async (request, reply) => {
     const homeQuery = z.object({ profileId: z.string().uuid().optional(), language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query);
     const profile = homeQuery.profileId;
-    if (profile && !(await profileBelongsToDevice(profile, deviceId(request)))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    if (profile && !(await profileBelongsToAccount(profile))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     const catalog = await hasNormalizedCatalog()
       ? await listNormalizedHomeCatalog(50_000, homeQuery.language) as HomeMedia[]
       : (await pool.query<HomeMedia>(`SELECT kind,id,title,description,poster_url AS "posterUrl",backdrop_url AS "backdropUrl",
@@ -254,25 +262,50 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     if (profile) {
       const normalizedCatalog = await hasNormalizedCatalog();
       const [watch, favorites] = await Promise.all(normalizedCatalog ? [
-        pool.query(`SELECT w.kind,p.provider_id AS id,p.provider_id AS "streamId",${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+        pool.query(`WITH candidates AS (
+          SELECT w.kind,p.provider_id AS id,p.provider_id AS "streamId",p.parent_provider_id AS "seriesId",p.title_id AS canonical_id,
+            CASE WHEN w.kind='episode' THEN concat_ws(':',se.series_title_id,se.season_number,se.episode_number)
+              ELSE p.title_id::text END AS dedupe_key,
+            ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
             JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
             ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
-          COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds"
+            COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",w.position_seconds AS "positionSeconds",
+            w.duration_seconds AS "durationSeconds",w.updated_at
           FROM watch_progress w JOIN sc_provider_streams p ON p.kind=w.kind AND p.provider_id=w.catalog_id AND p.active
-          JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
+          LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
             AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
-          WHERE w.profile_id=$1 AND w.kind IN ('movie','episode') AND NOT w.completed ORDER BY w.updated_at DESC LIMIT 12`, [profile, homeQuery.language]),
-        pool.query(`SELECT m.kind,p.provider_id AS id,${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+          LEFT JOIN sc_series_episodes se ON se.episode_title_id=p.title_id
+          WHERE w.profile_id=$1 AND w.kind IN ('movie','episode') AND NOT w.completed
+        ), deduped AS (
+          SELECT candidates.*,row_number() OVER (PARTITION BY kind,dedupe_key ORDER BY updated_at DESC,id) AS duplicate_rank FROM candidates
+        )
+        SELECT kind,id,"streamId","seriesId",title,"posterUrl","backdropUrl","positionSeconds","durationSeconds"
+        FROM deduped WHERE duplicate_rank=1 ORDER BY updated_at DESC LIMIT 12`, [profile, homeQuery.language]),
+        pool.query(`SELECT m.kind,p.provider_id AS id,CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
           JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
-          ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
-          COALESCE(tx.poster_url,t.poster_url) AS "posterUrl" FROM my_list m
+          ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,
+          COALESCE(p.poster_url,tx.poster_url,t.poster_url,(SELECT art_tx.poster_url FROM sc_title_translations art_tx
+            WHERE art_tx.title_id=t.id AND NULLIF(art_tx.poster_url,'') IS NOT NULL
+            ORDER BY (art_tx.source='tmdb') DESC,art_tx.language_id LIMIT 1)) AS "posterUrl",t.backdrop_url AS "backdropUrl" FROM my_list m
           JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
-          JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
+          LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
             AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
           WHERE m.profile_id=$1 ORDER BY m.created_at DESC LIMIT 12`, [profile, homeQuery.language])
       ] : [
-        pool.query(`SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds" FROM watch_progress w JOIN catalog c ON c.kind=w.kind AND c.id=w.catalog_id WHERE w.profile_id=$1 AND w.kind IN ('movie','episode') AND NOT w.completed AND c.active ORDER BY w.updated_at DESC LIMIT 12`, [profile]),
-        pool.query(`SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl" FROM my_list m JOIN catalog c ON c.kind=m.kind AND c.id=m.catalog_id WHERE m.profile_id=$1 AND c.active ORDER BY m.created_at DESC LIMIT 12`, [profile])
+        pool.query(`WITH candidates AS (
+          SELECT c.kind,c.id,c.parent_id AS "seriesId",c.title,c.poster_url AS "posterUrl",w.position_seconds AS "positionSeconds",
+            w.duration_seconds AS "durationSeconds",w.updated_at,
+            CASE WHEN c.kind='episode' AND c.parent_id IS NOT NULL AND c.season_number IS NOT NULL AND c.episode_number IS NOT NULL
+              THEN concat('episode:',c.parent_id,':',c.season_number,':',c.episode_number)
+              ELSE concat(c.kind,':',${normalizedTitleSql('c.title')},':',COALESCE(c.release_year::text,'')) END AS dedupe_key
+          FROM watch_progress w JOIN catalog c ON c.kind=w.kind AND c.id=w.catalog_id
+          WHERE w.profile_id=$1 AND w.kind IN ('movie','episode') AND NOT w.completed AND c.active
+        ), deduped AS (
+          SELECT candidates.*,row_number() OVER (PARTITION BY dedupe_key ORDER BY updated_at DESC,id) AS duplicate_rank FROM candidates
+        )
+        SELECT kind,id,"seriesId",title,"posterUrl","positionSeconds","durationSeconds" FROM deduped
+        WHERE duplicate_rank=1 ORDER BY updated_at DESC LIMIT 12`, [profile]),
+        pool.query(`SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl",c.backdrop_url AS "backdropUrl" FROM my_list m JOIN catalog c ON c.kind=m.kind AND c.id=m.catalog_id WHERE m.profile_id=$1 AND c.active ORDER BY m.created_at DESC LIMIT 12`, [profile])
       ]);
       rows.unshift({ id: 'continue', title: 'Continue Watching', items: watch.rows }, { id: 'my-list', title: 'My List', items: favorites.rows });
     }
@@ -432,6 +465,14 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     if (!(await hasNormalizedCatalog())) return { items: [{ id, providerId: id }] };
     return { items: await listNormalizedEpisodeStreams(id, language) };
   });
+  app.get('/api/v1/episodes/:id/parent', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const episode = await getCatalog('episode', id);
+    if (!episode) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Episode not found.' } });
+    const seriesId = episode.parentId ?? null;
+    const series = seriesId ? await getCatalog('series', seriesId) : null;
+    return { seriesId, seriesTitle: series?.title ?? null };
+  });
   app.get('/api/v1/search', async (request) => {
     const query = z.object({ page: z.coerce.number().int().min(1).default(1), limit: z.coerce.number().int().min(2).max(80).default(20),
       q: z.string().trim().min(2).max(100), language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query);
@@ -441,50 +482,112 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
   });
 
   app.get('/api/v1/profiles', async (request) => {
-    const { rows } = await pool.query('SELECT id,name,preferences FROM profiles WHERE device_id=$1 ORDER BY created_at', [deviceId(request)]);
-    return { items: rows };
+    const device = deviceId(request);
+    const [{ rows: items }, { rows: selection }] = await Promise.all([
+      pool.query("SELECT id,name,preferences,is_main AS \"isMain\" FROM profiles WHERE account_id='primary' ORDER BY created_at"),
+      pool.query<{ profileId: string }>('SELECT profile_id AS "profileId" FROM device_profile_selections WHERE device_id=$1', [device])
+    ]);
+    return { items, selectedProfileId: selection[0]?.profileId ?? null, mainProfileId: items.find((item) => item.isMain)?.id ?? null };
   });
   app.post('/api/v1/profiles', async (request, reply) => {
     const { name } = profileName.parse(request.body);
     const id = randomUUID();
-    await pool.query('INSERT INTO profiles(id,device_id,name) VALUES($1,$2,$3)', [id, deviceId(request), name]);
-    return reply.code(201).send({ id, name });
+    const { rows } = await pool.query(`INSERT INTO profiles(id,device_id,name,account_id,is_main)
+      VALUES($1,$2,$3,'primary',NOT EXISTS(SELECT 1 FROM profiles WHERE account_id='primary' AND is_main))
+      RETURNING id,name,preferences,is_main AS "isMain"`, [id, deviceId(request), name]);
+    return reply.code(201).send(rows[0]);
+  });
+  app.put('/api/v1/profiles/selection', async (request, reply) => {
+    const { profileId } = z.object({ profileId: profileParam.shape.id }).parse(request.body);
+    if (!(await profileBelongsToAccount(profileId))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    const device = deviceId(request);
+    await pool.query(`INSERT INTO device_profile_selections(device_id,profile_id) VALUES($1,$2)
+      ON CONFLICT(device_id) DO UPDATE SET profile_id=EXCLUDED.profile_id,updated_at=now()`, [device, profileId]);
+    return { selectedProfileId: profileId };
+  });
+  app.put('/api/v1/profiles/:id/main', async (request, reply) => {
+    const { id } = profileParam.parse(request.params);
+    if (!(await profileBelongsToAccount(id))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("UPDATE profiles SET is_main=false WHERE account_id='primary' AND is_main");
+      await client.query("UPDATE profiles SET is_main=true WHERE id=$1 AND account_id='primary'", [id]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+    return { mainProfileId: id };
+  });
+  app.put('/api/v1/profiles/:id/preferences', async (request, reply) => {
+    const { id } = profileParam.parse(request.params);
+    if (!(await profileBelongsToAccount(id))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    const { settings } = profileSettingsInput.parse(request.body);
+    const { rows } = await pool.query(`UPDATE profiles SET preferences=preferences || jsonb_build_object('settings',$2::jsonb)
+      WHERE id=$1 RETURNING preferences`, [id, JSON.stringify(settings)]);
+    return { preferences: rows[0].preferences };
   });
   app.get('/api/v1/profiles/:id/continue-watching', async (request, reply) => {
     const { id } = profileParam.parse(request.params);
-    if (!(await profileBelongsToDevice(id, deviceId(request)))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    if (!(await profileBelongsToAccount(id))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     const language = z.object({ language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query).language;
     const normalized = await hasNormalizedCatalog();
     const { rows } = await pool.query(normalized
-      ? `SELECT w.kind,p.provider_id AS id,${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+      ? `WITH candidates AS (
+        SELECT w.kind,p.provider_id AS id,p.parent_provider_id AS "seriesId",p.title_id AS canonical_id,
+          CASE WHEN w.kind='episode' THEN concat_ws(':',se.series_title_id,se.season_number,se.episode_number)
+            ELSE p.title_id::text END AS dedupe_key,
+          ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
             JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
             ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
           COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",
-          w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",w.catalog_id AS "streamId"
+          w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",w.catalog_id AS "streamId",w.updated_at
         FROM watch_progress w JOIN sc_provider_streams p ON p.kind=w.kind AND p.provider_id=w.catalog_id AND p.active
-        JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
-        WHERE w.profile_id=$1 AND NOT w.completed ORDER BY w.updated_at DESC LIMIT 20`
-      : `SELECT w.kind,w.catalog_id AS id,w.catalog_id AS "streamId",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",c.title,c.poster_url AS "posterUrl" FROM watch_progress w JOIN catalog c ON c.kind=w.kind AND c.id=w.catalog_id WHERE w.profile_id=$1 AND NOT w.completed AND c.active ORDER BY w.updated_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
+        LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
+        LEFT JOIN sc_series_episodes se ON se.episode_title_id=p.title_id
+        WHERE w.profile_id=$1 AND NOT w.completed
+      ), deduped AS (
+        SELECT candidates.*,row_number() OVER (PARTITION BY kind,dedupe_key ORDER BY updated_at DESC,id) AS duplicate_rank FROM candidates
+      )
+      SELECT kind,id,"seriesId",title,"posterUrl","backdropUrl","positionSeconds","durationSeconds","streamId"
+      FROM deduped WHERE duplicate_rank=1 ORDER BY updated_at DESC LIMIT 20`
+      : `WITH candidates AS (
+        SELECT w.kind,w.catalog_id AS id,w.catalog_id AS "streamId",c.parent_id AS "seriesId",c.title,c.poster_url AS "posterUrl",
+          c.backdrop_url AS "backdropUrl",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",w.updated_at,
+          CASE WHEN c.kind='episode' AND c.parent_id IS NOT NULL AND c.season_number IS NOT NULL AND c.episode_number IS NOT NULL
+            THEN concat('episode:',c.parent_id,':',c.season_number,':',c.episode_number)
+            ELSE concat(c.kind,':',${normalizedTitleSql('c.title')},':',COALESCE(c.release_year::text,'')) END AS dedupe_key
+        FROM watch_progress w JOIN catalog c ON c.kind=w.kind AND c.id=w.catalog_id
+        WHERE w.profile_id=$1 AND NOT w.completed AND c.active
+      ), deduped AS (
+        SELECT candidates.*,row_number() OVER (PARTITION BY dedupe_key ORDER BY updated_at DESC,id) AS duplicate_rank FROM candidates
+      )
+      SELECT kind,id,"streamId","seriesId","positionSeconds","durationSeconds",title,"posterUrl","backdropUrl"
+      FROM deduped WHERE duplicate_rank=1 ORDER BY updated_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
     return { items: rows };
   });
   app.get('/api/v1/profiles/:id/my-list', async (request, reply) => {
     const { id } = profileParam.parse(request.params);
-    if (!(await profileBelongsToDevice(id, deviceId(request)))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    if (!(await profileBelongsToAccount(id))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     const language = z.object({ language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query).language;
     const normalized = await hasNormalizedCatalog();
     const { rows } = await pool.query(normalized
-      ? `SELECT m.kind,p.provider_id AS id,${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+      ? `SELECT m.kind,p.provider_id AS id,p.provider_id AS "streamId",CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
             JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
-            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,COALESCE(tx.poster_url,t.poster_url) AS "posterUrl"
+            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,
+          COALESCE(tx.poster_url,t.poster_url,(SELECT art_tx.poster_url FROM sc_title_translations art_tx
+            WHERE art_tx.title_id=t.id AND NULLIF(art_tx.poster_url,'') IS NOT NULL
+            ORDER BY (art_tx.source='tmdb') DESC,art_tx.language_id LIMIT 1)) AS "posterUrl",t.backdrop_url AS "backdropUrl"
         FROM my_list m JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
-        JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
+        LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
         WHERE m.profile_id=$1 ORDER BY m.created_at DESC LIMIT 20`
-      : `SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl" FROM my_list m JOIN catalog c ON c.kind=m.kind AND c.id=m.catalog_id WHERE m.profile_id=$1 AND c.active ORDER BY m.created_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
+      : `SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl",c.backdrop_url AS "backdropUrl" FROM my_list m JOIN catalog c ON c.kind=m.kind AND c.id=m.catalog_id WHERE m.profile_id=$1 AND c.active ORDER BY m.created_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
     return { items: rows };
   });
   app.post('/api/v1/profiles/:id/my-list', async (request, reply) => {
     const { id: profileId } = profileParam.parse(request.params);
-    if (!(await profileBelongsToDevice(profileId, deviceId(request)))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    if (!(await profileBelongsToAccount(profileId))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     const body = listInput.parse(request.body);
     if (body.saved) await pool.query(`INSERT INTO my_list(profile_id,kind,catalog_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [profileId, body.kind, body.id]);
     else await pool.query(`DELETE FROM my_list WHERE profile_id=$1 AND kind=$2 AND catalog_id=$3`, [profileId, body.kind, body.id]);
@@ -492,7 +595,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
   });
   app.post('/api/v1/profiles/:id/progress', async (request, reply) => {
     const { id: profileId } = profileParam.parse(request.params);
-    if (!(await profileBelongsToDevice(profileId, deviceId(request)))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
+    if (!(await profileBelongsToAccount(profileId))) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Profile not found.' } });
     const body = progressInput.parse(request.body);
     await pool.query(`INSERT INTO watch_progress(profile_id,kind,catalog_id,position_seconds,duration_seconds,completed)
       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(profile_id,kind,catalog_id) DO UPDATE SET position_seconds=EXCLUDED.position_seconds,
@@ -512,6 +615,97 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     }
     const url = playbackUrl(credentials, item, body.format);
     return { url, format: body.format ?? item.streamExtension ?? 'm3u8' };
+  });
+  app.post('/api/v1/playback/proxy-ticket', async (request, reply) => {
+    const body = z.object({ kind: z.literal('live'), id: z.string().regex(/^\d+$/), format: z.enum(['m3u8', 'ts']).default('m3u8') }).parse(request.body);
+    const item = await getCatalog('live', body.id);
+    if (!item) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Stream not found.' } });
+    const credentials = await loadProvider(options.credentialKey);
+    if (!credentials) return reply.code(503).send({ error: { code: 'PROVIDER_UNAVAILABLE', message: 'Provider is not configured.' } });
+    if (credentials.allowedLiveFormats?.length && !credentials.allowedLiveFormats.includes(body.format)) {
+      return reply.code(422).send({ error: { code: 'FORMAT_UNAVAILABLE', message: 'The provider does not support this live format.' } });
+    }
+    const expires = Math.floor(Date.now() / 1000) + 8 * 60 * 60;
+    const payload = Buffer.from(JSON.stringify({ kind: 'live', id: body.id, device: deviceId(request), expires, format: body.format })).toString('base64url');
+    const signature = createHmac('sha256', options.credentialKey).update(payload).digest('base64url');
+    return { url: `/api/v1/playback/proxy/live/${body.id}?ticket=${payload}.${signature}` };
+  });
+  app.get('/api/v1/playback/proxy/live/:id', async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const query = z.object({ ticket: z.string().max(1024), resource: z.string().max(8192).optional(), signature: z.string().max(128).optional() }).parse(request.query);
+    const [payload, supplied] = query.ticket.split('.');
+    if (!payload || !supplied) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } });
+    const expected = createHmac('sha256', options.credentialKey).update(payload).digest();
+    let actual: Buffer;
+    try { actual = Buffer.from(supplied, 'base64url'); } catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } });
+    let claims: { kind: string; id: string; device: string; expires: number; format: 'm3u8' | 'ts' };
+    try { claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as typeof claims; }
+    catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
+    if (claims.kind !== 'live' || claims.id !== id || claims.expires < Math.floor(Date.now() / 1000) ||
+      !/^[0-9a-f-]{36}$/i.test(claims.device) || !['m3u8', 'ts'].includes(claims.format)) {
+      return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is expired or invalid.' } });
+    }
+    const item = await getCatalog('live', id);
+    if (!item) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Stream not found.' } });
+    const credentials = await loadProvider(options.credentialKey);
+    if (!credentials) return reply.code(503).send({ error: { code: 'PROVIDER_UNAVAILABLE', message: 'Provider is not configured.' } });
+    let upstreamUrl = playbackUrl(credentials, item, claims.format);
+    if (query.resource) {
+      if (!query.signature) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Stream resource signature is missing.' } });
+      const expectedResourceSignature = createHmac('sha256', options.credentialKey).update(`${query.ticket}.${query.resource}`).digest();
+      let actualResourceSignature: Buffer;
+      try { actualResourceSignature = Buffer.from(query.signature, 'base64url'); } catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Stream resource signature is invalid.' } }); }
+      if (actualResourceSignature.length !== expectedResourceSignature.length || !timingSafeEqual(actualResourceSignature, expectedResourceSignature)) {
+        return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Stream resource signature is invalid.' } });
+      }
+      try {
+        const resourceUrl = new URL(decrypt(Buffer.from(query.resource, 'base64url').toString('utf8'), options.credentialKey));
+        if (!['http:', 'https:'].includes(resourceUrl.protocol)) throw new Error('Invalid stream resource protocol.');
+        upstreamUrl = resourceUrl.toString();
+      } catch { return reply.code(400).send({ error: { code: 'INVALID_RESOURCE', message: 'Stream resource URL is invalid.' } }); }
+    }
+    const controller = new AbortController();
+    let upstream: Response;
+    try {
+      upstream = await fetch(upstreamUrl, { signal: controller.signal, redirect: 'follow', headers: {
+        accept: '*/*', ...(typeof request.headers.range === 'string' ? { range: request.headers.range } : {})
+      } });
+    } catch {
+      return reply.code(502).send({ error: { code: 'LIVE_PROXY_FAILED', message: 'The provider could not start this channel.' } });
+    }
+    reply.raw.on('close', () => { if (!reply.raw.writableEnded) controller.abort(); });
+    const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream';
+    const isPlaylist = contentType.toLowerCase().includes('mpegurl') || /\.m3u8(?:$|\?)/i.test(upstreamUrl);
+    reply.code(upstream.status);
+    for (const header of ['content-range', 'accept-ranges', 'cache-control']) {
+      const value = upstream.headers.get(header);
+      if (value) reply.header(header, value);
+    }
+    if (isPlaylist && upstream.ok) {
+      const playlist = await upstream.text();
+      if (playlist.length > 2_000_000) return reply.code(502).send({ error: { code: 'PLAYLIST_TOO_LARGE', message: 'The channel playlist is too large.' } });
+      const proxyResource = (value: string): string => {
+        let target: URL;
+        try { target = new URL(value, upstream.url || upstreamUrl); } catch { return value; }
+        if (!['http:', 'https:'].includes(target.protocol)) return value;
+        // Encrypt the provider URL so credentials embedded in HLS segment URLs
+        // never appear in browser-visible playlist URLs.
+        const resource = Buffer.from(encrypt(target.toString(), options.credentialKey)).toString('base64url');
+        const signature = createHmac('sha256', options.credentialKey).update(`${query.ticket}.${resource}`).digest('base64url');
+        return `/api/v1/playback/proxy/live/${id}?ticket=${encodeURIComponent(query.ticket)}&resource=${encodeURIComponent(resource)}&signature=${encodeURIComponent(signature)}`;
+      };
+      const rewritten = playlist.split(/\r?\n/).map((line) => {
+        if (!line) return line;
+        if (line.startsWith('#')) return line.replace(/URI="([^"]+)"/g, (_match, uri: string) => `URI="${proxyResource(uri)}"`);
+        return proxyResource(line);
+      }).join('\n');
+      return reply.type('application/vnd.apple.mpegurl; charset=utf-8').send(rewritten);
+    }
+    reply.type(contentType);
+    if (upstream.headers.has('content-length')) reply.header('content-length', upstream.headers.get('content-length')!);
+    if (!upstream.body) return reply.send();
+    return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>));
   });
   app.post('/api/v1/playback/remux-ticket', async (request, reply) => {
     const body = z.object({ kind: z.enum(['movie', 'episode']), id: z.string().regex(/^\d+$/), transcode: z.boolean().default(false) }).parse(request.body);

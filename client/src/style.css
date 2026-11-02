@@ -57,6 +57,34 @@
 .central-series-scroll-up{top:4px}.central-series-scroll-down{bottom:4px}
 .central-series-scroll-controls svg{display:block;width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .central-series-scroll-controls button:hover,.central-series-scroll-controls button:focus{background:rgba(0,0,0,.9);outline:0;box-shadow:0 0 0 2px var(--brand-cyan)}
+.central-series-pane.has-scroll-indicators .central-season-picker,.central-series-pane.has-scroll-indicators .central-episode-container{padding-top:42px;padding-bottom:42px}
+.central-series-browser .central-season-picker{padding-left:10px}
+.webos-client .central-series-browser .central-season-picker{padding-left:10px}
+.central-series-browser .central-season-pane{z-index:1;min-width:0}
+.central-series-browser .central-episode-pane{position:relative;z-index:2;min-width:0;overflow:hidden}
+.central-detail .central-episode:focus,.central-detail .central-episode:focus-visible{border-color:transparent;outline:3px solid var(--brand-cyan);outline-offset:2px;box-shadow:none}
+body.dpad-navigation #central-app .central-card:hover:not(:focus),body.dpad-navigation #central-app .central-more:hover:not(:focus),body.dpad-navigation #central-app .central-episode:hover:not(:focus){border-color:transparent!important;outline:0!important;box-shadow:none!important;transform:none!important}
+#central-app .central-series-browser .central-season-picker .central-more:focus,#central-app .central-series-browser .central-season-picker .central-more:focus-visible{border-color:transparent!important;outline:2px solid var(--brand-cyan)!important;outline-offset:2px;box-shadow:none!important}
+.central-series-browser .central-season-picker{padding-top:12px}
+.central-series-browser .central-season-picker{padding-bottom:12px}
+.central-episode-container{padding:12px}
+.central-series-pane.has-scroll-indicators .central-season-picker,.central-series-pane.has-scroll-indicators .central-episode-container{padding-top:42px;padding-bottom:42px}
+.webos-client .central-series-browser .central-season-picker{padding-top:12px;padding-bottom:12px;padding-left:10px}
+.webos-client .central-series-pane.has-scroll-indicators .central-season-picker,.webos-client .central-series-pane.has-scroll-indicators .central-episode-container{padding-top:42px!important;padding-bottom:42px!important}
+
+/* My Cinema stays viewport-locked; its individual shelves retain horizontal scrolling. */
+html.my-cinema-open,body.my-cinema-open{width:100%;height:100%;overflow:hidden}
+.central-app.my-cinema-open{width:100%;height:100vh;height:100dvh;min-height:0;overflow:hidden}
+.central-app.my-cinema-open main{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;padding:88px 0 0;overflow:hidden}
+.central-app.my-cinema-open #central-content{display:flex;flex:1 1 auto;flex-direction:column;width:100%;height:0;min-height:0;overflow:hidden}
+.central-app.my-cinema-open #central-content>.central-page-kicker{flex:none;margin:8px 2.1% 5px;font-size:12px;line-height:16px}
+.central-app.my-cinema-open #central-content>.central-page-title{flex:none;margin:0 2.1% 10px;font-size:clamp(28px,3.2vw,52px);line-height:1.05}
+.central-app.my-cinema-open #central-content>.central-row{flex:none;margin:0 2.1% clamp(8px,1.2vh,14px);padding:0}
+.central-app.my-cinema-open .central-row h2{margin:0 0 7px;font-size:clamp(16px,1.45vw,22px);line-height:1.15}
+.central-app.my-cinema-open .central-row .central-card{height:clamp(56px,calc((100dvh - 300px)/2),210px);min-height:56px;max-height:210px}
+.central-app.my-cinema-open .central-row .central-cards{padding:18px 30px 28px}
+#central-app button,#central-app input,#central-app select,#central-app textarea,#central-player button{scroll-margin:12px}
+@media(max-width:650px){.central-app.my-cinema-open main{padding-top:65px}.central-app.my-cinema-open #central-content>.central-page-title{font-size:clamp(26px,7vw,36px)}.central-app.my-cinema-open .central-row .central-card{height:clamp(56px,calc((100vh - 300px)/2),210px)}}
 @media(max-width:650px){.central-series-detail{height:100vh;height:100svh;margin-top:0;grid-template-rows:minmax(0,3fr) minmax(0,1.3fr)}.central-series-detail .central-detail-body{width:90%;margin:0 0 24px 5%}.central-series-detail .central-detail-meta{font-size:13px}.central-series-detail p{font-size:15px;-webkit-line-clamp:2}.central-series-detail .central-detail-actions{margin-top:10px}.central-series-browser{grid-template-columns:minmax(108px,28vw) minmax(0,1fr);gap:8px;margin-left:3%;margin-right:3%}.central-series-browser .central-season-picker .central-more{padding:10px 8px;font-size:14px}.central-episode-container .central-episode{padding:12px;font-size:16px}.central-episode small{font-size:13px}}
 
 .central-series-browser{margin-left:5.2%;margin-right:5.2%}
@@ -68,8 +96,14 @@
 .central-profile-picker{position:fixed;z-index:10;top:108px;left:50%;transform:translateX(-50%);width:min(440px,calc(100vw - 32px));height:min(280px,calc(100dvh - 128px));min-height:190px;box-sizing:border-box;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:14px;padding:22px 24px;background:linear-gradient(145deg,rgba(30,30,30,.98),rgba(12,12,12,.98));border:1px solid #333;border-radius:8px;box-shadow:0 16px 50px rgba(0,0,0,.6);overflow:hidden}
 .central-profile-picker h1{margin:0;font-size:25px;line-height:1.15;font-weight:800;color:#fff}
 .central-profile-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:8px;min-height:0;overflow-y:auto;scrollbar-width:thin}
+.central-profile-option{display:grid;grid-template-rows:auto auto;gap:3px;min-width:0}
 .central-profile-choice,.central-profile-add{min-height:44px;padding:9px 13px;border:1px solid #414141;border-radius:4px;background:#262626;color:#fff;font-size:16px;font-weight:700;text-align:left}
-.central-profile-choice:hover,.central-profile-choice:focus,.central-profile-add:hover,.central-profile-add:focus{background:#383838;border-color:#eee;outline:2px solid rgba(255,255,255,.8);outline-offset:1px}
+.central-profile-choice{display:flex;width:100%;align-items:center;justify-content:space-between;gap:6px}
+.central-profile-choice:hover,.central-profile-choice:focus,.central-profile-add:hover,.central-profile-add:focus{background:#383838;border-color:var(--brand-cyan);outline:2px solid var(--brand-cyan);outline-offset:2px}
+.central-profile-main-label{flex:none;color:var(--brand-cyan);font-size:9px;font-weight:800;letter-spacing:.08em}
+.central-profile-main{min-height:26px;padding:3px 8px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--brand-cyan);font-size:11px;font-weight:700;text-align:center}
+.central-profile-main:hover,.central-profile-main:focus{border-color:var(--brand-cyan);outline:2px solid var(--brand-cyan);outline-offset:1px}
+.central-profile-main.is-main,.central-profile-main:disabled{color:#888;cursor:default}
 .central-profile-create{display:flex;align-items:center;gap:8px;min-width:0}
 .central-profile-input{min-width:0;flex:1;height:42px;padding:0 12px;border:1px solid #555;border-radius:4px;background:#161616;color:#fff;font-size:15px}
 .central-profile-add{flex:none;text-align:center;background:var(--brand-cyan);border-color:var(--brand-cyan)}
@@ -401,8 +435,108 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 .webos-client .central-live-grid>.central-card{flex:0 0 calc(16.666% - 8px);width:calc(16.666% - 8px);height:calc((24vh - 64px)/2);min-width:0;min-height:0;max-width:none;max-height:none;margin:0 0 12px;aspect-ratio:auto}
 .webos-client .central-live-category-bar{flex:0 0 auto}
 @media(max-width:900px){.webos-client .central-card{width:28vw;min-width:180px;height:15.75vw;min-height:100px;flex-basis:28vw}.webos-client .central-search-page>.central-search-results>.central-card{flex-basis:32%;width:32%;height:18vw;margin-right:.66%;margin-left:.66%}.webos-client .central-live-grid>.central-card{flex-basis:calc(16.666% - 5px);width:calc(16.666% - 5px)}}
+
+/* Leave a real focus-safe gutter around every shelf card. The shelf arrows sit
+   in the padding, while cards and their focus rings stay fully in view. */
+.central-app .central-shelf .central-cards{box-sizing:border-box;padding:18px 48px 30px;scroll-padding:18px 48px;}
+.central-app .central-shelf-arrow.left{left:0}
+.central-app .central-shelf-arrow.right{right:0}
+.central-app :is(button,input,select,textarea,[tabindex]):focus{scroll-margin:18px}
+.central-app.my-cinema-open .central-row{z-index:2}
+@media(max-width:650px){
+  .central-app .central-shelf .central-cards{padding:16px 40px 26px;scroll-padding:16px 40px}
+}
 @media(max-width:600px){.webos-client .central-settings{padding-top:74px}.webos-client .central-settings-layout{flex-direction:column;gap:8px}.webos-client .central-settings-sidebar{display:flex;flex:0 0 auto;width:100%;height:auto;max-height:190px;flex-flow:row wrap;overflow-y:auto}.webos-client .central-settings-group-label{flex:0 0 100%}.webos-client .central-settings-nav-item{flex:0 0 49%;width:49%}.webos-client .central-settings-pages{flex:1 1 auto;width:100%;height:0}.webos-client .central-live-grid{flex-basis:25vh;height:25vh;max-height:25vh}.webos-client .central-live-grid>.central-card{height:calc((25vh - 64px)/2)}.webos-client .central-series-detail{height:calc(100vh - 65px);margin-top:65px}.webos-client .central-series-detail .central-detail-body{flex-basis:62%;width:90%;margin:8px 0 8px 5%}.webos-client .central-series-browser{width:94%;margin-right:3%;margin-left:3%}.webos-client .central-series-browser .central-season-pane{flex-basis:28%;width:28%;margin-right:8px}.webos-client .central-series-browser .central-season-picker .central-more{padding:9px 8px;font-size:14px}}
 @media(max-width:600px){.webos-client .central-whats-new-title{padding-top:74px;font-size:36px}}
 @media(max-width:900px){.webos-client .webos-select{min-width:110px;max-width:32vw}.webos-client .webos-select-trigger{min-height:42px;padding:8px 34px 8px 10px;font-size:14px}.webos-client .webos-select-trigger:after{right:10px;width:14px;height:14px}}
 
 .webos-server-address{display:none}.webos-client .webos-server-address{display:block}
+
+/* Shared browser and webOS player chrome. */
+#central-player>.central-player-ui,
+#central-player>.central-player-progress,
+#central-player>.central-player-actions{display:none!important}
+#central-player>.central-browser-player-chrome{position:absolute;inset:0;z-index:110;display:block;pointer-events:none;color:#fff;transition:opacity .2s ease}
+#central-player.controls-hidden>.central-browser-player-chrome{opacity:0;pointer-events:none}
+.central-browser-player-rail{position:absolute;left:24px;top:50%;display:flex;flex-direction:column;gap:9px;transform:translateY(-50%);pointer-events:auto}
+.central-browser-player-rail button{display:grid;place-items:center;width:44px;height:44px;padding:10px;border:0;border-radius:50%;background:rgba(240,247,255,.92);color:#263548;box-shadow:0 2px 12px rgba(0,0,0,.45);transition:transform .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}
+.central-browser-player-rail button svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.central-browser-player-rail #central-browser-player-favorite{background:#ffc84a;color:#513e08}
+.central-browser-player-rail #central-browser-player-favorite[aria-pressed=true]{background:var(--brand-cyan);color:#07151a}
+.central-browser-player-rail button:hover,
+.central-browser-player-rail button:focus-visible{outline:2px solid var(--brand-cyan);outline-offset:2px;transform:scale(1.08);box-shadow:0 0 16px var(--brand-cyan-soft)}
+.central-browser-player-bottom{position:absolute;left:4.2%;right:4.2%;bottom:18px;padding:12px 14px 8px;border:1px solid rgba(37,223,255,.68);border-radius:6px;background:rgba(5,9,16,.82);box-shadow:0 3px 18px rgba(0,0,0,.62);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);pointer-events:auto}
+.central-browser-player-info{display:flex;align-items:center;justify-content:space-between;gap:22px;min-height:40px;margin-bottom:2px}
+.central-browser-player-title-block{display:flex;min-width:0;flex-direction:column;gap:3px}
+.central-browser-player-title-block strong{overflow:hidden;color:#fff;font-size:clamp(15px,1.15vw,20px);font-weight:800;line-height:1.16;text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 4px #000}
+.central-browser-player-title-block span{overflow:hidden;color:#d7e8f4;font-size:13px;line-height:1.1;text-overflow:ellipsis;white-space:nowrap}
+.central-browser-player-technical{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:2px;color:#dce8f1;font-size:10px;font-weight:700;line-height:1.05;text-align:right;text-shadow:0 1px 4px #000}
+.central-browser-player-technical strong{color:var(--brand-cyan);font-size:10px;letter-spacing:.04em}
+.central-browser-player-timeline{display:grid;grid-template-columns:42px 58px 38px minmax(60px,1fr) 38px 58px;align-items:center;gap:10px;min-height:43px;padding:0 2px}
+.central-browser-player-timeline>span{color:#fff;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-align:center;text-shadow:0 1px 4px #000}
+.central-browser-player-timeline button{display:grid;place-items:center;width:36px;height:34px;margin:auto;padding:5px;border:0;border-radius:5px;background:transparent;color:#f2f7fb}
+.central-browser-player-timeline button:first-child{width:38px;height:36px;border:2px solid var(--brand-cyan);border-radius:9px;background:rgba(0,0,0,.42);color:#fff;box-shadow:0 0 8px var(--brand-cyan-soft)}
+.central-browser-player-timeline button svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.central-browser-player-timeline button:first-child svg{width:24px;height:24px;fill:currentColor;stroke:none}
+.central-browser-player-timeline button svg text{fill:currentColor;stroke:none;font:700 10px Arial,sans-serif}
+.central-browser-player-timeline button:hover,
+.central-browser-player-timeline button:focus-visible{outline:2px solid var(--brand-cyan);outline-offset:1px;background:rgba(37,223,255,.14)}
+input#central-browser-player-track[type=range]{width:100%;height:28px;margin:0;padding:0;border:0;background:linear-gradient(to right,var(--brand-cyan) 0%,var(--brand-cyan) var(--progress-percent,0%),rgba(255,255,255,.84) var(--progress-percent,0%),rgba(255,255,255,.84) 100%) center/100% 4px no-repeat;cursor:pointer;appearance:none;-webkit-appearance:none;touch-action:pan-x}
+input#central-browser-player-track[type=range]::-webkit-slider-runnable-track{height:4px;border:0;border-radius:5px;background:transparent}
+input#central-browser-player-track[type=range]::-webkit-slider-thumb{width:13px;height:13px;margin-top:-4.5px;border:0;border-radius:50%;background:#f7fbff;box-shadow:0 0 5px rgba(0,0,0,.65);appearance:none;-webkit-appearance:none}
+input#central-browser-player-track[type=range]::-moz-range-track{height:4px;border:0;border-radius:5px;background:rgba(255,255,255,.84)}
+input#central-browser-player-track[type=range]::-moz-range-progress{height:4px;border-radius:5px;background:var(--brand-cyan)}
+input#central-browser-player-track[type=range]::-moz-range-thumb{width:13px;height:13px;border:0;border-radius:50%;background:#f7fbff;box-shadow:0 0 5px rgba(0,0,0,.65)}
+input#central-browser-player-track[type=range]:focus{outline:0}
+input#central-browser-player-track[type=range]:focus::-webkit-slider-thumb{box-shadow:0 0 0 4px rgba(37,223,255,.35)}
+.central-player-center-controls{position:absolute;z-index:111;top:50%;left:50%;bottom:auto;transform:translate(-50%,-50%);pointer-events:none}
+.central-player-center-controls #central-rewind,
+.central-player-center-controls #central-forward{display:none}
+.central-player-center-controls #central-play-pause{display:grid;place-items:center;width:68px;height:68px;min-width:68px;padding:14px;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(8,15,24,.55);color:var(--brand-cyan);opacity:.92;pointer-events:auto;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}
+.central-player-center-controls #central-play-pause svg{width:34px;height:34px;filter:drop-shadow(0 1px 4px #000)}
+.central-player-center-controls #central-play-pause:focus-visible{outline:2px solid var(--brand-cyan);outline-offset:3px}
+#central-player .central-next-episode{z-index:130}
+#central-player-stream-menu{z-index:140}
+@media(max-width:700px){.central-browser-player-rail{left:10px;gap:7px}.central-browser-player-rail button{width:38px;height:38px;padding:9px}.central-browser-player-bottom{left:3%;right:3%;bottom:calc(10px + env(safe-area-inset-bottom,0px));padding:8px 9px 5px}.central-browser-player-info{gap:8px;min-height:34px;margin-bottom:1px}.central-browser-player-title-block strong{font-size:14px}.central-browser-player-title-block span{font-size:11px}.central-browser-player-technical{font-size:9px}.central-browser-player-technical strong{font-size:9px}.central-browser-player-timeline{grid-template-columns:32px 40px 28px minmax(28px,1fr) 28px 40px;gap:4px;min-height:34px}.central-browser-player-timeline>span{font-size:10px}.central-browser-player-timeline button{width:28px;height:28px;padding:3px}.central-browser-player-timeline button:first-child{width:30px;height:30px}.central-browser-player-timeline button svg{width:18px;height:18px}.central-player-center-controls #central-play-pause{width:56px;height:56px;min-width:56px}.central-player-center-controls #central-play-pause svg{width:29px;height:29px}}
+@media(max-width:390px){.central-browser-player-rail{left:6px;gap:5px}.central-browser-player-rail button{width:33px;height:33px;padding:7px}.central-browser-player-rail button svg{width:19px;height:19px}.central-browser-player-timeline{grid-template-columns:28px 35px 24px minmax(20px,1fr) 24px 35px;gap:2px}}
+
+/* Refinements requested for the browser player controls. */
+.central-browser-player-rail #central-browser-player-favorite{background:var(--brand-cyan);color:#07151a}
+.central-browser-player-rail #central-browser-player-favorite svg{fill:currentColor}
+.central-browser-player-rail #central-browser-player-favorite[aria-pressed=true]{background:var(--brand-violet);color:#fff}
+.central-browser-player-rail #central-browser-player-audio{position:relative}
+.central-browser-player-language{position:absolute;right:-5px;bottom:-5px;display:grid;place-items:center;min-width:19px;height:15px;padding:0 3px;border-radius:9px;background:var(--brand-violet);color:#fff;font-size:8px;font-weight:900;line-height:1;box-shadow:0 1px 5px #000}
+.central-browser-player-timeline button:first-child[aria-label="Pause"] svg{fill:currentColor;stroke:none}
+.central-browser-player-timeline button:first-child[aria-label="Pause"] svg path{fill:currentColor}
+.central-player-center-controls{display:none!important}
+.central-browser-player-state{position:absolute;z-index:111;left:50%;top:50%;display:grid;place-items:center;width:72px;height:72px;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(8,15,24,.55);color:var(--brand-cyan);opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.9);transition:opacity .16s ease,transform .16s ease;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}
+.central-browser-player-state.visible{opacity:.92;transform:translate(-50%,-50%) scale(1)}
+.central-browser-player-state svg{width:34px;height:34px;fill:currentColor;filter:drop-shadow(0 1px 4px #000)}
+#central-player-stream-menu{left:80px;right:auto;top:50%;width:min(410px,calc(100vw - 104px));max-height:76vh;transform:translateY(-50%)}
+@media(max-width:700px){.central-browser-player-state{width:58px;height:58px}.central-browser-player-state svg{width:29px;height:29px}#central-player-stream-menu{left:57px;width:calc(100vw - 70px)}}
+.central-browser-player-timeline.seek-selected input#central-browser-player-track{outline:2px solid var(--brand-cyan);outline-offset:3px;border-radius:8px}
+.central-browser-player-timeline.seek-selected input#central-browser-player-track:focus::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(37,223,255,.38)}
+/* Seekbar focus and seek mode are visually distinct. */
+input#central-browser-player-track[type=range]:focus{outline:2px solid var(--brand-cyan);outline-offset:3px;border-radius:8px}
+.central-browser-player-timeline.seek-selected input#central-browser-player-track[type=range]:focus{outline-color:rgba(37,223,255,.48);outline-width:2px}
+.central-browser-player-timeline.seek-selected input#central-browser-player-track[type=range]::-webkit-slider-thumb{width:17px;height:17px;margin-top:-6.5px;box-shadow:0 0 0 3px rgba(37,223,255,.2),0 0 11px 4px rgba(37,223,255,.78)}
+.central-browser-player-timeline.seek-selected input#central-browser-player-track[type=range]::-moz-range-thumb{width:17px;height:17px;box-shadow:0 0 0 3px rgba(37,223,255,.2),0 0 11px 4px rgba(37,223,255,.78)}
+
+/* C9 uses the shared NightOwl controls over the LG media-service video. */
+.webos-client #central-player>.central-browser-player-chrome{z-index:110;display:block;pointer-events:none}
+.webos-client .central-browser-player-rail{left:38px;gap:11px}
+.webos-client .central-browser-player-rail button:focus{outline:3px solid var(--brand-cyan);outline-offset:2px;box-shadow:0 0 16px var(--brand-cyan-soft)}
+.webos-client .central-browser-player-timeline button:focus{outline:3px solid var(--brand-cyan);outline-offset:2px;background:rgba(37,223,255,.16)}
+.webos-client #central-browser-player-fullscreen{display:none!important}
+.webos-client .central-browser-player-bottom{bottom:24px;padding:12px 16px 8px;background:rgba(5,9,16,.88);backdrop-filter:none;-webkit-backdrop-filter:none}
+.webos-client .central-browser-player-technical strong{color:var(--brand-cyan)}
+.webos-client .central-browser-player-timeline{display:flex!important;flex-flow:row nowrap!important;align-items:center!important;gap:10px!important;width:100%;min-width:0;min-height:50px;padding:0 2px}
+.webos-client .central-browser-player-timeline>button{display:flex!important;flex:0 0 40px!important;align-items:center;justify-content:center;width:40px!important;height:40px!important;margin:0!important;padding:6px!important;position:static!important;transform:none}
+.webos-client .central-browser-player-timeline>button:first-child{flex-basis:42px!important;width:42px!important;height:40px!important}
+.webos-client .central-browser-player-timeline>span{display:block!important;flex:0 0 58px!important;width:58px;min-width:58px;font-size:13px;text-align:center}
+.webos-client .central-browser-player-timeline>input#central-browser-player-track[type=range]{display:block!important;flex:1 1 auto!important;width:0!important;min-width:60px!important;max-width:none!important;height:36px!important;min-height:36px!important;margin:0!important;padding:0!important;position:relative!important}
+.webos-client input#central-browser-player-track[type=range]{min-height:36px;height:36px;background-size:100% 6px}
+.webos-client input#central-browser-player-track[type=range]:focus{outline:0;box-shadow:none}
+.webos-client input#central-browser-player-track[type=range]:focus::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(37,223,255,.35)}
+.central-browser-player-timeline #central-browser-player-play:focus,.central-browser-player-timeline #central-browser-player-play:focus-visible{outline:0!important;box-shadow:0 0 14px 4px var(--brand-cyan-soft)!important;background:rgba(37,223,255,.18)!important}
+.central-remux-prompt{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.72)}.central-remux-dialog{width:min(460px,92vw);padding:28px;border:1px solid rgba(255,255,255,.16);border-radius:16px;background:#17191f;color:#fff;box-shadow:0 18px 70px rgba(0,0,0,.7)}.central-remux-dialog strong{display:block;font-size:24px;font-weight:800}.central-remux-dialog p{margin:14px 0 24px;color:#d2d5dc;line-height:1.45}.central-remux-dialog>div{display:flex;justify-content:flex-end;gap:12px}.central-remux-dialog button{min-height:46px;padding:10px 18px;border:1px solid #596171;border-radius:8px;background:#2a2e37;color:#fff;font:inherit;font-weight:700;cursor:pointer}.central-remux-dialog #central-remux-confirm{border-color:var(--brand-cyan);background:var(--brand-cyan);color:#061014}.central-remux-dialog button:focus-visible{outline:3px solid var(--brand-cyan);outline-offset:3px}
