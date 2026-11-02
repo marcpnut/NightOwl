@@ -627,7 +627,8 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
       return reply.code(422).send({ error: { code: 'FORMAT_UNAVAILABLE', message: 'The provider does not support this live format.' } });
     }
     const expires = Math.floor(Date.now() / 1000) + 8 * 60 * 60;
-    const payload = Buffer.from(JSON.stringify({ kind: body.kind, id: body.id, device: deviceId(request), expires, format })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ kind: body.kind, id: body.id, device: deviceId(request), expires, format,
+      ...(item.resolvedSourceUrl ? { source: encrypt(item.resolvedSourceUrl, options.credentialKey) } : {}) })).toString('base64url');
     const signature = createHmac('sha256', options.credentialKey).update(payload).digest('base64url');
     return { url: `/api/v1/playback/proxy/${body.kind}/${body.id}?ticket=${payload}.${signature}` };
   });
@@ -640,7 +641,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     let actual: Buffer;
     try { actual = Buffer.from(supplied, 'base64url'); } catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } });
-    let claims: { kind: string; id: string; device: string; expires: number; format: string };
+    let claims: { kind: string; id: string; device: string; expires: number; format: string; source?: string };
     try { claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as typeof claims; }
     catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
     if (claims.kind !== kind || claims.id !== id || claims.expires < Math.floor(Date.now() / 1000) ||
@@ -652,7 +653,11 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     if (!item) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Stream not found.' } });
     const credentials = await loadProvider(options.credentialKey);
     if (!credentials) return reply.code(503).send({ error: { code: 'PROVIDER_UNAVAILABLE', message: 'Provider is not configured.' } });
-    let upstreamUrl = playbackUrl(credentials, item, claims.format);
+    let upstreamUrl: string;
+    try {
+      upstreamUrl = claims.source ? decrypt(claims.source, options.credentialKey) : playbackUrl(credentials, item, claims.format);
+      if (!['http:', 'https:'].includes(new URL(upstreamUrl).protocol)) throw new Error('Unsupported provider URL.');
+    } catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback source ticket is invalid.' } }); }
     if (query.resource) {
       if (!query.signature) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Stream resource signature is missing.' } });
       const expectedResourceSignature = createHmac('sha256', options.credentialKey).update(`${query.ticket}.${query.resource}`).digest();
