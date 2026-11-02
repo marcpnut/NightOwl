@@ -805,8 +805,8 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
 }
 async function resolvePlaybackSource(kind: 'live' | 'movie' | 'episode', id: string, format?: 'm3u8' | 'ts'): Promise<string> {
   const resolved = await api<{ url: string }>('/playback/resolve', { kind, id, ...(kind === 'live' && format ? { format } : {}) });
-  if (kind === 'live' && location.protocol === 'https:' && !document.body.classList.contains('webos-client') && new URL(resolved.url).protocol === 'http:') {
-    const ticket = await api<{ url: string }>('/playback/proxy-ticket', { kind, id, format: format ?? 'm3u8' });
+  if (location.protocol === 'https:' && !document.body.classList.contains('webos-client') && new URL(resolved.url).protocol === 'http:') {
+    const ticket = await api<{ url: string }>('/playback/proxy-ticket', { kind, id, ...(kind === 'live' ? { format: format ?? 'm3u8' } : {}) });
     return new URL(ticket.url, `${config!.url}/`).toString();
   }
   return resolved.url;

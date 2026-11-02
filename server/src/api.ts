@@ -104,7 +104,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     if (request.method === 'OPTIONS') return reply.code(204).send();
     if (!request.url.startsWith('/api/v1/')) return;
     const path = request.url.split('?')[0];
-    if (path === '/api/v1/health' || path === '/api/v1/auth/status' || path === '/api/v1/auth/login' || path.startsWith('/api/v1/playback/remux/') || path.startsWith('/api/v1/playback/proxy/live/')) return;
+    if (path === '/api/v1/health' || path === '/api/v1/auth/status' || path === '/api/v1/auth/login' || path.startsWith('/api/v1/playback/remux/') || path.startsWith('/api/v1/playback/proxy/')) return;
     const device = deviceId(request);
     if (tokenMatches(request.headers.authorization, options.apiToken)) return;
     const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
@@ -617,21 +617,22 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     return { url, format: body.format ?? item.streamExtension ?? 'm3u8' };
   });
   app.post('/api/v1/playback/proxy-ticket', async (request, reply) => {
-    const body = z.object({ kind: z.literal('live'), id: z.string().regex(/^\d+$/), format: z.enum(['m3u8', 'ts']).default('m3u8') }).parse(request.body);
-    const item = await getCatalog('live', body.id);
+    const body = z.object({ kind: z.enum(['live', 'movie', 'episode']), id: z.string().regex(/^\d+$/), format: z.enum(['m3u8', 'ts']).optional() }).parse(request.body);
+    const item = await getCatalog(body.kind, body.id);
     if (!item) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Stream not found.' } });
     const credentials = await loadProvider(options.credentialKey);
     if (!credentials) return reply.code(503).send({ error: { code: 'PROVIDER_UNAVAILABLE', message: 'Provider is not configured.' } });
-    if (credentials.allowedLiveFormats?.length && !credentials.allowedLiveFormats.includes(body.format)) {
+    const format = body.kind === 'live' ? (body.format ?? 'm3u8') : item.streamExtension ?? 'mp4';
+    if (body.kind === 'live' && credentials.allowedLiveFormats?.length && !credentials.allowedLiveFormats.includes(format)) {
       return reply.code(422).send({ error: { code: 'FORMAT_UNAVAILABLE', message: 'The provider does not support this live format.' } });
     }
     const expires = Math.floor(Date.now() / 1000) + 8 * 60 * 60;
-    const payload = Buffer.from(JSON.stringify({ kind: 'live', id: body.id, device: deviceId(request), expires, format: body.format })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ kind: body.kind, id: body.id, device: deviceId(request), expires, format })).toString('base64url');
     const signature = createHmac('sha256', options.credentialKey).update(payload).digest('base64url');
-    return { url: `/api/v1/playback/proxy/live/${body.id}?ticket=${payload}.${signature}` };
+    return { url: `/api/v1/playback/proxy/${body.kind}/${body.id}?ticket=${payload}.${signature}` };
   });
-  app.get('/api/v1/playback/proxy/live/:id', async (request, reply) => {
-    const { id } = idParam.parse(request.params);
+  app.get('/api/v1/playback/proxy/:kind/:id', async (request, reply) => {
+    const { kind, id } = z.object({ kind: z.enum(['live', 'movie', 'episode']), id: z.string().regex(/^\d+$/) }).parse(request.params);
     const query = z.object({ ticket: z.string().max(1024), resource: z.string().max(8192).optional(), signature: z.string().max(128).optional() }).parse(request.query);
     const [payload, supplied] = query.ticket.split('.');
     if (!payload || !supplied) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } });
@@ -639,14 +640,15 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     let actual: Buffer;
     try { actual = Buffer.from(supplied, 'base64url'); } catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } });
-    let claims: { kind: string; id: string; device: string; expires: number; format: 'm3u8' | 'ts' };
+    let claims: { kind: string; id: string; device: string; expires: number; format: string };
     try { claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as typeof claims; }
     catch { return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is invalid.' } }); }
-    if (claims.kind !== 'live' || claims.id !== id || claims.expires < Math.floor(Date.now() / 1000) ||
-      !/^[0-9a-f-]{36}$/i.test(claims.device) || !['m3u8', 'ts'].includes(claims.format)) {
+    if (claims.kind !== kind || claims.id !== id || claims.expires < Math.floor(Date.now() / 1000) ||
+      !/^[0-9a-f-]{36}$/i.test(claims.device) || !/^[a-z0-9]{2,5}$/i.test(claims.format) || (kind === 'live' && !['m3u8', 'ts'].includes(claims.format))) {
       return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Playback ticket is expired or invalid.' } });
     }
-    const item = await getCatalog('live', id);
+    if (query.resource && kind !== 'live') return reply.code(400).send({ error: { code: 'INVALID_RESOURCE', message: 'Only Live TV playlist resources are supported.' } });
+    const item = await getCatalog(kind, id);
     if (!item) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Stream not found.' } });
     const credentials = await loadProvider(options.credentialKey);
     if (!credentials) return reply.code(503).send({ error: { code: 'PROVIDER_UNAVAILABLE', message: 'Provider is not configured.' } });
@@ -682,7 +684,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
       const value = upstream.headers.get(header);
       if (value) reply.header(header, value);
     }
-    if (isPlaylist && upstream.ok) {
+    if (kind === 'live' && isPlaylist && upstream.ok) {
       const playlist = await upstream.text();
       if (playlist.length > 2_000_000) return reply.code(502).send({ error: { code: 'PLAYLIST_TOO_LARGE', message: 'The channel playlist is too large.' } });
       const proxyResource = (value: string): string => {
